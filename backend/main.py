@@ -1,0 +1,184 @@
+import os
+import io
+from pathlib import Path
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pypdf import PdfReader
+import psycopg2
+from pydantic import BaseModel, Field
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+
+from rag_engine import index_policy_document, retrieve_policy_context
+from brand_engine import evaluate_brand_compliance
+
+# Load environment configuration
+env_path = Path(__file__).resolve().parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
+
+app = FastAPI(
+    title="CodeNexus Compliance & Brand Audit API",
+    version="2.0",
+    description="Automated enterprise policy validation and brand integrity engine."
+)
+
+# CORS Middleware Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Global Vector Cache
+POLICY_VECTORSTORE = None
+
+DEFAULT_BRAND_GUIDELINES = """
+[BRAND TONE & IDENTITY RULES]
+1. Tonality: Must remain objective, professional, and fact-driven. Avoid sensationalism or marketing hyperbole (e.g., 'revolutionary', 'best-in-the-world', '100% bug-free').
+2. Terminology:
+   - Approved: 'AI-assisted solution', 'Enterprise partner', 'Compliance framework'.
+   - Restricted: 'Magic AI', 'Cheap service', 'Guaranteed instant results'.
+3. Verification & Claims:
+   - Performance metrics and turnaround timelines must reference verifiable empirical benchmarks.
+   - Absolute liability exemptions or unbacked performance assurances are strictly prohibited.
+"""
+
+class ComplianceReport(BaseModel):
+    is_compliant: bool = Field(description="True if document complies with policy, False otherwise.")
+    violations: list[str] = Field(description="List of specific violations found.")
+    source_references: list[str] = Field(description="Policy clauses/pages violated.")
+    summary: str = Field(description="Evaluation summary.")
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.5-flash",
+    api_key=os.getenv("GOOGLE_API_KEY"),
+    temperature=0.0
+)
+structured_compliance_llm = llm.with_structured_output(ComplianceReport)
+
+compliance_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are an automated Compliance Auditor. Match the document strictly against the provided policy context.\n"
+               "If ANY rule is violated, mark is_compliant as False and itemize the violation.\n\n"
+               "POLICY CONTEXT:\n{policy}"),
+    ("human", "DOCUMENT CONTENT:\n{document}")
+])
+
+compliance_chain = compliance_prompt | structured_compliance_llm
+
+def get_db():
+    return psycopg2.connect(
+        dbname=os.getenv("DB_NAME", "codenexus_db"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST", "localhost"),
+        port=os.getenv("DB_PORT", "5432")
+    )
+
+@app.on_event("startup")
+def preload_policy():
+    global POLICY_VECTORSTORE
+    policy_path = Path(__file__).resolve().parent / "policy.pdf"
+    if policy_path.exists():
+        POLICY_VECTORSTORE = index_policy_document(str(policy_path))
+        print("Policy vector store successfully indexed.")
+    else:
+        print(f"Policy file not found at: {policy_path}")
+
+@app.get("/")
+def health_check():
+    return {"status": "healthy", "service": "CodeNexus Compliance & Brand Audit Engine"}
+
+@app.post("/api/audit-document")
+async def audit_document(file: UploadFile = File(...)):
+    global POLICY_VECTORSTORE
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    if POLICY_VECTORSTORE is None:
+        raise HTTPException(status_code=500, detail="Policy index is not initialized.")
+
+    content = await file.read()
+    reader = PdfReader(io.BytesIO(content))
+    extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
+
+    if not extracted_text:
+        raise HTTPException(status_code=400, detail="Unable to extract readable text from document.")
+
+    matched_policy_clauses = retrieve_policy_context(POLICY_VECTORSTORE, extracted_text[:2000])
+
+    try:
+        report: ComplianceReport = compliance_chain.invoke({
+            "policy": matched_policy_clauses,
+            "document": extracted_text
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM processing error: {str(e)}")
+
+    status = "COMPLIANT" if report.is_compliant else "NON_COMPLIANT"
+    violations_str = "\n".join(report.violations) if report.violations else "None"
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO document_compliance (filename, extracted_text, is_compliant, status, violations)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, created_at;
+            """,
+            (file.filename, extracted_text, report.is_compliant, status, violations_str)
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database logging error: {str(e)}")
+
+    return {
+        "audit_id": row[0],
+        "filename": file.filename,
+        "status": status,
+        "is_compliant": report.is_compliant,
+        "warning_triggered": not report.is_compliant,
+        "violations": report.violations,
+        "source_references": report.source_references,
+        "summary": report.summary,
+        "created_at": row[1]
+    }
+
+@app.post("/api/brand-audit")
+async def brand_audit(file: UploadFile = File(...)):
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+
+    guidelines_path = Path(__file__).resolve().parent / "brand_guidelines.txt"
+    if guidelines_path.exists():
+        with open(guidelines_path, "r", encoding="utf-8") as f:
+            guidelines_text = f.read()
+    else:
+        # Fallback to default corporate standards if file is missing
+        guidelines_text = DEFAULT_BRAND_GUIDELINES
+
+    content = await file.read()
+    reader = PdfReader(io.BytesIO(content))
+    extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
+
+    if not extracted_text:
+        raise HTTPException(status_code=400, detail="Unable to extract readable text from document.")
+
+    try:
+        brand_report = evaluate_brand_compliance(extracted_text, guidelines_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Brand audit error: {str(e)}")
+
+    return {
+        "filename": file.filename,
+        "overall_tone": brand_report.overall_tone_score,
+        "claims_evaluation": [item.dict() for item in brand_report.claims_evaluation],
+        "forbidden_terms": brand_report.forbidden_terms_found,
+        "recommendations": brand_report.recommendations
+    }

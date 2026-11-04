@@ -1,0 +1,11 @@
+# env variables
+.env
+.env.local
+.env.*.local
+*.env
+# python virtual environment & cache
+.venv/
+__pycache__/
+*.pyc
+# local storage and database
+*.db

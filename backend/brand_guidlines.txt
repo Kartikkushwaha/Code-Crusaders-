@@ -1,0 +1,8 @@
+[BRAND TONE & IDENTITY RULES]
+1. Tone must be professional, objective, and realistic. Avoid hype or buzzwords like "world's best", "guaranteed #1", "100% bug-free".
+2. Approved Terminology:
+   - Use "AI-powered compliance engine" instead of "magic AI solution".
+   - Use "Enterprise client" instead of "Customer".
+3. Claims Policy:
+   - Every metric or factual performance statement (e.g. "% accuracy", "delivery in X hours") must provide verifiable empirical proof.
+   - Any claim promising absolute zero risk or absolute perfection is strictly prohibited.
