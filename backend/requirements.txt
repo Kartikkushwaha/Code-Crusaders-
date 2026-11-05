@@ -13,4 +13,4 @@ langchain-text-splitters>=0.2.0
 langchain-google-genai>=1.0.0
 google-genai>=0.1.0
 langchain-qdrant>=0.1.0
-sentence-transformers>=2.6.0
+fastembed>=0.2.0
