@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 
-from rag_engine import index_policy_document, retrieve_policy_context
+# Fix: Import index_policy_bytes instead of index_policy_document
+from rag_engine import index_policy_bytes, retrieve_policy_context
 from brand_engine import evaluate_brand_compliance
 
 # Load environment configuration
@@ -32,9 +33,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global Vector Cache
-POLICY_VECTORSTORE = None
-
 DEFAULT_BRAND_GUIDELINES = """
 [BRAND TONE & IDENTITY RULES]
 1. Tonality: Must remain objective, professional, and fact-driven. Avoid sensationalism or marketing hyperbole (e.g., 'revolutionary', 'best-in-the-world', '100% bug-free').
@@ -53,7 +51,7 @@ class ComplianceReport(BaseModel):
     summary: str = Field(description="Evaluation summary.")
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash",
+    model="gemini-2.5-flash",
     api_key=os.getenv("GOOGLE_API_KEY"),
     temperature=0.0
 )
@@ -77,37 +75,32 @@ def get_db():
         port=os.getenv("DB_PORT", "5432")
     )
 
-@app.on_event("startup")
-def preload_policy():
-    global POLICY_VECTORSTORE
-    policy_path = Path(__file__).resolve().parent / "policy.pdf"
-    if policy_path.exists():
-        POLICY_VECTORSTORE = index_policy_document(str(policy_path))
-        print("Policy vector store successfully indexed.")
-    else:
-        print(f"Policy file not found at: {policy_path}")
-
 @app.get("/")
 def health_check():
     return {"status": "healthy", "service": "CodeNexus Compliance & Brand Audit Engine"}
 
 @app.post("/api/audit-document")
-async def audit_document(file: UploadFile = File(...)):
-    global POLICY_VECTORSTORE
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+async def audit_document(
+    document_file: UploadFile = File(..., description="Target document to verify"),
+    policy_file: UploadFile = File(..., description="Company policy PDF to check against")
+):
+    if not document_file.filename.endswith(".pdf") or not policy_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Both uploaded files must be valid PDF documents.")
 
-    if POLICY_VECTORSTORE is None:
-        raise HTTPException(status_code=500, detail="Policy index is not initialized.")
+    doc_bytes = await document_file.read()
+    policy_bytes = await policy_file.read()
 
-    content = await file.read()
-    reader = PdfReader(io.BytesIO(content))
+    reader = PdfReader(io.BytesIO(doc_bytes))
     extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
     if not extracted_text:
-        raise HTTPException(status_code=400, detail="Unable to extract readable text from document.")
+        raise HTTPException(status_code=400, detail="Target document contains no readable text.")
 
-    matched_policy_clauses = retrieve_policy_context(POLICY_VECTORSTORE, extracted_text[:2000])
+    try:
+        temp_vectorstore = index_policy_bytes(policy_bytes)
+        matched_policy_clauses = retrieve_policy_context(temp_vectorstore, extracted_text[:2000])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Policy vector indexing error: {str(e)}")
 
     try:
         report: ComplianceReport = compliance_chain.invoke({
@@ -120,6 +113,10 @@ async def audit_document(file: UploadFile = File(...)):
     status = "COMPLIANT" if report.is_compliant else "NON_COMPLIANT"
     violations_str = "\n".join(report.violations) if report.violations else "None"
 
+    audit_id = "N/A"
+    created_at = "Live Session"
+
+    # PostgreSQL logging with safe bypass if DB is not configured in Render
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -129,25 +126,28 @@ async def audit_document(file: UploadFile = File(...)):
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id, created_at;
             """,
-            (file.filename, extracted_text, report.is_compliant, status, violations_str)
+            (document_file.filename, extracted_text, report.is_compliant, status, violations_str)
         )
         row = cursor.fetchone()
         conn.commit()
         cursor.close()
         conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database logging error: {str(e)}")
+        audit_id = row[0]
+        created_at = str(row[1])
+    except Exception as db_err:
+        print(f"⚠️ Database logging bypassed: {db_err}")
 
     return {
-        "audit_id": row[0],
-        "filename": file.filename,
+        "audit_id": audit_id,
+        "filename": document_file.filename,
+        "policy_used": policy_file.filename,
         "status": status,
         "is_compliant": report.is_compliant,
         "warning_triggered": not report.is_compliant,
         "violations": report.violations,
         "source_references": report.source_references,
         "summary": report.summary,
-        "created_at": row[1]
+        "created_at": created_at
     }
 
 @app.post("/api/brand-audit")
@@ -160,7 +160,6 @@ async def brand_audit(file: UploadFile = File(...)):
         with open(guidelines_path, "r", encoding="utf-8") as f:
             guidelines_text = f.read()
     else:
-        # Fallback to default corporate standards if file is missing
         guidelines_text = DEFAULT_BRAND_GUIDELINES
 
     content = await file.read()
