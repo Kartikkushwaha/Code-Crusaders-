@@ -53,8 +53,8 @@
         try {
           // Trigger both Compliance and Brand Audit concurrently
           const [complianceRes, brandRes] = await Promise.all([
-            fetch("http://127.0.0.1:8000/api/audit-document", { method: "POST", body: formData }),
-            fetch("http://127.0.0.1:8000/api/brand-audit", { method: "POST", body: formData })
+            fetch("https://event-manager-som4.onrender.com/api/audit-document", { method: "POST", body: formData }),
+            fetch("https://event-manager-som4.onrender.com/api/brand-audit", { method: "POST", body: formData })
           ]);
 
           if (!complianceRes.ok) {
