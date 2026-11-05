@@ -152,49 +152,27 @@ async def audit_document(
     }
 
 @app.post("/api/audit-document")
-async def audit_document(
-    file: UploadFile = File(None),
-    document_file: UploadFile = File(None),
-    policy_file: UploadFile = File(None)
-):
-    # Support both old single-file format ('file') and dual-file format ('document_file')
-    target_file = document_file or file
-    if target_file is None:
-        raise HTTPException(status_code=400, detail="Target document PDF is required.")
-
-    if not target_file.filename.endswith(".pdf"):
+async def audit_document(file: UploadFile = File(...)):
+    if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    doc_bytes = await target_file.read()
+    doc_bytes = await file.read()
     reader = PdfReader(io.BytesIO(doc_bytes))
     extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
     if not extracted_text:
         raise HTTPException(status_code=400, detail="Target document contains no readable text.")
 
-    matched_policy_clauses = ""
-    policy_name = "Default Global Policy"
-
-    # Agar policy upload hui hai toh dynamic vectorstore banao
-    if policy_file is not None and policy_file.filename.endswith(".pdf"):
-        try:
-            policy_bytes = await policy_file.read()
-            temp_vectorstore = index_policy_bytes(policy_bytes)
-            matched_policy_clauses = retrieve_policy_context(temp_vectorstore, extracted_text[:2000])
-            policy_name = policy_file.filename
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Policy vector indexing error: {str(e)}")
-    else:
-        # Fallback compliance context jab frontend se policy upload na aaye
-        matched_policy_clauses = (
-            "Clause 1 (Data Privacy): Documents must strictly forbid unauthorized exposure of personal identifiable information (PII) or confidential API keys.\n"
-            "Clause 2 (Claims & Guarantees): Absolute performance claims (e.g. '100% bug-free', 'zero downtime guarantee') are strictly prohibited without empirical SLA verification.\n"
-            "Clause 3 (Liability): Liability limitations and regulatory compliance frameworks must adhere to standard enterprise audit boundaries."
-        )
+    # Static / Default enterprise policy rules
+    policy_context = (
+        "Clause 1 (Data Privacy & PII): Documents must strictly forbid unauthorized exposure of personal identifiable information (PII), secret tokens, or customer credentials.\n"
+        "Clause 2 (Brand & Performance Claims): Absolute performance claims (e.g., '100% bug-free', 'guaranteed zero downtime') are prohibited without verifiable SLA benchmarks.\n"
+        "Clause 3 (Liability & Compliance): Liability disclaimers and regulatory frameworks must follow standard statutory audit guidelines."
+    )
 
     try:
         report: ComplianceReport = compliance_chain.invoke({
-            "policy": matched_policy_clauses,
+            "policy": policy_context,
             "document": extracted_text
         })
     except Exception as e:
@@ -206,7 +184,7 @@ async def audit_document(
     audit_id = "N/A"
     created_at = "Live Session"
 
-    # Neon PostgreSQL logging
+    # PostgreSQL logging
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -216,7 +194,7 @@ async def audit_document(
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id, created_at;
             """,
-            (target_file.filename, extracted_text, report.is_compliant, status, violations_str)
+            (file.filename, extracted_text, report.is_compliant, status, violations_str)
         )
         row = cursor.fetchone()
         conn.commit()
@@ -229,8 +207,7 @@ async def audit_document(
 
     return {
         "audit_id": audit_id,
-        "filename": target_file.filename,
-        "policy_used": policy_name,
+        "filename": file.filename,
         "status": status,
         "is_compliant": report.is_compliant,
         "warning_triggered": not report.is_compliant,
