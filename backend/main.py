@@ -151,34 +151,91 @@ async def audit_document(
         "created_at": created_at
     }
 
-@app.post("/api/brand-audit")
-async def brand_audit(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
+@app.post("/api/audit-document")
+async def audit_document(
+    file: UploadFile = File(None),
+    document_file: UploadFile = File(None),
+    policy_file: UploadFile = File(None)
+):
+    # Support both old single-file format ('file') and dual-file format ('document_file')
+    target_file = document_file or file
+    if target_file is None:
+        raise HTTPException(status_code=400, detail="Target document PDF is required.")
+
+    if not target_file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    guidelines_path = Path(__file__).resolve().parent / "brand_guidelines.txt"
-    if guidelines_path.exists():
-        with open(guidelines_path, "r", encoding="utf-8") as f:
-            guidelines_text = f.read()
-    else:
-        guidelines_text = DEFAULT_BRAND_GUIDELINES
-
-    content = await file.read()
-    reader = PdfReader(io.BytesIO(content))
+    doc_bytes = await target_file.read()
+    reader = PdfReader(io.BytesIO(doc_bytes))
     extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
     if not extracted_text:
-        raise HTTPException(status_code=400, detail="Unable to extract readable text from document.")
+        raise HTTPException(status_code=400, detail="Target document contains no readable text.")
+
+    matched_policy_clauses = ""
+    policy_name = "Default Global Policy"
+
+    # Agar policy upload hui hai toh dynamic vectorstore banao
+    if policy_file is not None and policy_file.filename.endswith(".pdf"):
+        try:
+            policy_bytes = await policy_file.read()
+            temp_vectorstore = index_policy_bytes(policy_bytes)
+            matched_policy_clauses = retrieve_policy_context(temp_vectorstore, extracted_text[:2000])
+            policy_name = policy_file.filename
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Policy vector indexing error: {str(e)}")
+    else:
+        # Fallback compliance context jab frontend se policy upload na aaye
+        matched_policy_clauses = (
+            "Clause 1 (Data Privacy): Documents must strictly forbid unauthorized exposure of personal identifiable information (PII) or confidential API keys.\n"
+            "Clause 2 (Claims & Guarantees): Absolute performance claims (e.g. '100% bug-free', 'zero downtime guarantee') are strictly prohibited without empirical SLA verification.\n"
+            "Clause 3 (Liability): Liability limitations and regulatory compliance frameworks must adhere to standard enterprise audit boundaries."
+        )
 
     try:
-        brand_report = evaluate_brand_compliance(extracted_text, guidelines_text)
+        report: ComplianceReport = compliance_chain.invoke({
+            "policy": matched_policy_clauses,
+            "document": extracted_text
+        })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Brand audit error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"LLM processing error: {str(e)}")
+
+    status = "COMPLIANT" if report.is_compliant else "NON_COMPLIANT"
+    violations_str = "\n".join(report.violations) if report.violations else "None"
+
+    audit_id = "N/A"
+    created_at = "Live Session"
+
+    # Neon PostgreSQL logging
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO document_compliance (filename, extracted_text, is_compliant, status, violations)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, created_at;
+            """,
+            (target_file.filename, extracted_text, report.is_compliant, status, violations_str)
+        )
+        row = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+        audit_id = row[0]
+        created_at = str(row[1])
+    except Exception as db_err:
+        print(f"⚠️ Database logging warning: {db_err}")
 
     return {
-        "filename": file.filename,
-        "overall_tone": brand_report.overall_tone_score,
-        "claims_evaluation": [item.dict() for item in brand_report.claims_evaluation],
-        "forbidden_terms": brand_report.forbidden_terms_found,
-        "recommendations": brand_report.recommendations
+        "audit_id": audit_id,
+        "filename": target_file.filename,
+        "policy_used": policy_name,
+        "status": status,
+        "is_compliant": report.is_compliant,
+        "warning_triggered": not report.is_compliant,
+        "violations": report.violations,
+        "source_references": report.source_references,
+        "summary": report.summary,
+        "created_at": created_at
     }
