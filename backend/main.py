@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 
-# Fix: Import index_policy_bytes instead of index_policy_document
 from rag_engine import index_policy_bytes, retrieve_policy_context
 from brand_engine import evaluate_brand_compliance
 
@@ -19,7 +18,7 @@ env_path = Path(__file__).resolve().parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
 app = FastAPI(
-    title="CodeNexus Compliance & Brand Audit API",
+    title="Publivra AI - Compliance & Brand Audit API",
     version="2.0",
     description="Automated enterprise policy validation and brand integrity engine."
 )
@@ -68,25 +67,25 @@ compliance_chain = compliance_prompt | structured_compliance_llm
 
 def get_db():
     return psycopg2.connect(
-        dbname=os.getenv("DB_NAME", "codenexus_db"),
-        user=os.getenv("DB_USER", "postgres"),
+        dbname=os.getenv("DB_NAME", "neondb"),
+        user=os.getenv("DB_USER", "neondb_owner"),
         password=os.getenv("DB_PASSWORD"),
-        host=os.getenv("DB_HOST", "localhost"),
+        host=os.getenv("DB_HOST"),
         port=os.getenv("DB_PORT", "5432"),
         sslmode="require"
     )
 
 @app.get("/")
 def health_check():
-    return {"status": "healthy", "service": "CodeNexus Compliance & Brand Audit Engine"}
+    return {"status": "healthy", "service": "Publivra AI Engine"}
 
 @app.post("/api/audit-document")
 async def audit_document(
-    document_file: UploadFile = File(..., description="Target document to verify"),
-    policy_file: UploadFile = File(..., description="Company policy PDF to check against")
+    document_file: UploadFile = File(..., description="Target document PDF to verify"),
+    policy_file: UploadFile = File(..., description="Policy PDF to check against")
 ):
     if not document_file.filename.endswith(".pdf") or not policy_file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Both uploaded files must be valid PDF documents.")
+        raise HTTPException(status_code=400, detail="Dono files PDF format mein honi chahiye.")
 
     doc_bytes = await document_file.read()
     policy_bytes = await policy_file.read()
@@ -95,7 +94,7 @@ async def audit_document(
     extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
     if not extracted_text:
-        raise HTTPException(status_code=400, detail="Target document contains no readable text.")
+        raise HTTPException(status_code=400, detail="Target document mein readable text nahi mila.")
 
     try:
         temp_vectorstore = index_policy_bytes(policy_bytes)
@@ -117,7 +116,6 @@ async def audit_document(
     audit_id = "N/A"
     created_at = "Live Session"
 
-    # PostgreSQL logging with safe bypass if DB is not configured in Render
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -136,7 +134,7 @@ async def audit_document(
         audit_id = row[0]
         created_at = str(row[1])
     except Exception as db_err:
-        print(f"⚠️ Database logging bypassed: {db_err}")
+        print(f"⚠️ Neon DB logging warning: {db_err}")
 
     return {
         "audit_id": audit_id,
@@ -151,68 +149,36 @@ async def audit_document(
         "created_at": created_at
     }
 
-@app.post("/api/audit-document")
-async def audit_document(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+@app.post("/api/brand-audit")
+async def brand_audit(
+    document_file: UploadFile = File(..., description="Target document for brand tone evaluation")
+):
+    if not document_file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Sirf PDF files allowed hain.")
 
-    doc_bytes = await file.read()
-    reader = PdfReader(io.BytesIO(doc_bytes))
+    guidelines_path = Path(__file__).resolve().parent / "brand_guidelines.txt"
+    if guidelines_path.exists():
+        with open(guidelines_path, "r", encoding="utf-8") as f:
+            guidelines_text = f.read()
+    else:
+        guidelines_text = DEFAULT_BRAND_GUIDELINES
+
+    content = await document_file.read()
+    reader = PdfReader(io.BytesIO(content))
     extracted_text = "\n".join([page.extract_text() or "" for page in reader.pages]).strip()
 
     if not extracted_text:
-        raise HTTPException(status_code=400, detail="Target document contains no readable text.")
-
-    # Static / Default enterprise policy rules
-    policy_context = (
-        "Clause 1 (Data Privacy & PII): Documents must strictly forbid unauthorized exposure of personal identifiable information (PII), secret tokens, or customer credentials.\n"
-        "Clause 2 (Brand & Performance Claims): Absolute performance claims (e.g., '100% bug-free', 'guaranteed zero downtime') are prohibited without verifiable SLA benchmarks.\n"
-        "Clause 3 (Liability & Compliance): Liability disclaimers and regulatory frameworks must follow standard statutory audit guidelines."
-    )
+        raise HTTPException(status_code=400, detail="Target document mein readable text nahi mila.")
 
     try:
-        report: ComplianceReport = compliance_chain.invoke({
-            "policy": policy_context,
-            "document": extracted_text
-        })
+        brand_report = evaluate_brand_compliance(extracted_text, guidelines_text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LLM processing error: {str(e)}")
-
-    status = "COMPLIANT" if report.is_compliant else "NON_COMPLIANT"
-    violations_str = "\n".join(report.violations) if report.violations else "None"
-
-    audit_id = "N/A"
-    created_at = "Live Session"
-
-    # PostgreSQL logging
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO document_compliance (filename, extracted_text, is_compliant, status, violations)
-            VALUES (%s, %s, %s, %s, %s)
-            RETURNING id, created_at;
-            """,
-            (file.filename, extracted_text, report.is_compliant, status, violations_str)
-        )
-        row = cursor.fetchone()
-        conn.commit()
-        cursor.close()
-        conn.close()
-        audit_id = row[0]
-        created_at = str(row[1])
-    except Exception as db_err:
-        print(f"⚠️ Database logging warning: {db_err}")
+        raise HTTPException(status_code=500, detail=f"Brand audit error: {str(e)}")
 
     return {
-        "audit_id": audit_id,
-        "filename": file.filename,
-        "status": status,
-        "is_compliant": report.is_compliant,
-        "warning_triggered": not report.is_compliant,
-        "violations": report.violations,
-        "source_references": report.source_references,
-        "summary": report.summary,
-        "created_at": created_at
+        "filename": document_file.filename,
+        "overall_tone": brand_report.overall_tone_score,
+        "claims_evaluation": [item.dict() for item in brand_report.claims_evaluation],
+        "forbidden_terms": brand_report.forbidden_terms_found,
+        "recommendations": brand_report.recommendations
     }
