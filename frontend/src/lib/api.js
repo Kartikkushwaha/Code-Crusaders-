@@ -1,7 +1,7 @@
 // Thin client for the PUBLIVRA AI FastAPI backend (Render).
 // Set VITE_API_URL in Vercel (Project → Settings → Environment Variables) or in .env.production.
 
-export const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+export const API_BASE = (import.meta.env.VITE_API_URL || "https://event-manager-som4.onrender.com").replace(/\/+$/, "");
 
 async function request(path, { method = "GET", body, timeout = 20000 } = {}) {
   const ctrl = new AbortController();
