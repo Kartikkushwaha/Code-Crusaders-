@@ -1,0 +1,72 @@
+// Thin client for the PUBLIVRA AI FastAPI backend (Render).
+// Set VITE_API_URL in Vercel (Project → Settings → Environment Variables) or in .env.production.
+
+export const API_BASE = (import.meta.env.VITE_API_URL || "https://event-manager-som4.onrender.com").replace(/\/+$/, "");
+
+async function request(path, { method = "GET", body, timeout = 20000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal,
+    });
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* non-JSON error page */
+    }
+    if (!res.ok) {
+      const detail = data?.detail;
+      throw new Error(typeof detail === "string" ? detail : `Server responded ${res.status}`);
+    }
+    return data;
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("The AI engine took too long to respond. Please try again.");
+    if (e instanceof TypeError) throw new Error(`Cannot reach the AI engine at ${API_BASE}.`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const api = {
+  // Render free instances sleep; the first request can take ~50 s to wake them.
+  health: () => request("/api/health", { timeout: 75000 }),
+  audit: (payload) => request("/api/audit", { method: "POST", body: payload, timeout: 150000 }),
+  createPublication: (payload) => request("/api/publications", { method: "POST", body: payload }),
+  verifyPublication: (id, payload) => request(`/api/publications/${id}/verify`, { method: "POST", body: payload }),
+  logEvent: (payload) => request("/api/events", { method: "POST", body: payload }).catch(() => null),
+};
+
+/** Map a backend finding onto the shape the dashboard uses for rule findings. */
+export function toUiFinding(f) {
+  const sentence = f.sentence || f.claim_text;
+  const suggestion =
+    f.suggested_rewrite && f.located
+      ? {
+          find: f.claim_text,
+          replace: f.suggested_rewrite,
+          preview: sentence.replace(f.claim_text, f.suggested_rewrite).replace(/\s{2,}/g, " ").trim(),
+        }
+      : null;
+  return {
+    id: f.id,
+    ai: true,
+    located: f.located,
+    sentence,
+    ruleKey: "ai",
+    verdict: f.verdict,
+    severity: f.verdict === "VERIFIED" ? "none" : f.severity,
+    category: f.category,
+    match: f.claim_text,
+    offset: f.offset ?? 0,
+    clause: "AI · approved-source audit",
+    explanation: f.explanation,
+    source: f.source_reference,
+    suggestion,
+  };
+}

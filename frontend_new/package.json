@@ -1,0 +1,28 @@
+{
+  "name": "publivra-ai-frontend",
+  "private": true,
+  "version": "2.0.0",
+  "description": "PUBLIVRA AI - evidence-based brand compliance & governance dashboard (CodeNexus India 2026, Round 2)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "package": "node scripts/package-zip.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "^0.540.0",
+    "pdfjs-dist": "^6.2.108",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.12",
+    "@vitejs/plugin-react": "^5.0.0",
+    "tailwindcss": "^4.1.12",
+    "vite": "^7.1.0"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}
