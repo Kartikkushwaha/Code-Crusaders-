@@ -20,7 +20,7 @@ import database
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("publivra.api")
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"  # 2.2: user policy as knowledge base, numbered policy lines, cited findings
 
 
 @asynccontextmanager
@@ -130,6 +130,7 @@ def health():
             "embedding_model": config.EMBEDDING_MODEL if config.GOOGLE_API_KEY else None,
         },
         "database": database.status(),
+        "features": ["user-policy-knowledge", "policy-line-refs", "full-policy-review"],
     }
 
 

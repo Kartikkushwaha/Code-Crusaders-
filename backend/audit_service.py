@@ -5,6 +5,7 @@ import re
 import brand_engine
 import config
 import database
+import policy_index
 import rag_engine
 
 TONE_PROFILES = {"Professional", "Formal", "Friendly"}
@@ -60,11 +61,14 @@ def compute_risk(findings, tone_score: int):
     return level, min(100, score)
 
 
-def normalise(report, document: str):
+def normalise(report, document: str, index=None):
     sentences = split_sentences(document)
     findings, seen = [], set()
     for f in report.findings:
         sentence, span, offset = locate(sentences, f.claim_text)
+        if sentence is None:
+            # Not in the current document (e.g. quoted from the policy or an earlier version): drop it.
+            continue
         key = (f.verdict, (span or "").lower(), sentence)
         if key in seen:
             continue
@@ -73,6 +77,12 @@ def normalise(report, document: str):
         if f.verdict == "VERIFIED" or sentence is None or rewrite.lower() == (span or "").lower():
             rewrite = ""
         fid = "ai:" + hashlib.sha1(f"{sentence}|{span}|{f.verdict}".encode()).hexdigest()[:12]
+        ref = policy_index.find_ref(index or [], f.policy_quote, f"{f.policy_reference} {f.source_reference}")
+        source_label = (
+            f"{ref['source']}, " + (f"p.{ref['page']} " if ref["page"] else "") + f"line {ref['line']}"
+            if ref
+            else (f.source_reference or "No approved source").strip()
+        )
         findings.append(
             {
                 "id": fid,
@@ -84,7 +94,10 @@ def normalise(report, document: str):
                 "verdict": f.verdict,
                 "severity": "none" if f.verdict == "VERIFIED" else (f.severity if f.severity != "none" else "medium"),
                 "explanation": f.explanation.strip(),
-                "source_reference": (f.source_reference or "No approved source").strip(),
+                "source_reference": source_label,
+                "policy_ref": ref,
+                "policy_quote": (ref["text"] if ref and ref["verified"] else f.policy_quote or "").strip(),
+                "recommendation": (f.recommendation or "").strip(),
                 "suggested_rewrite": rewrite,
             }
         )
@@ -92,33 +105,56 @@ def normalise(report, document: str):
 
 
 def build_sources(policy_rules: str = "", policy_document=None):
-    sources = [rag_engine.Source("Brand Guidelines", config.guidelines_text())]
-    if policy_rules and policy_rules.strip():
-        sources.append(rag_engine.Source("Policy Library", policy_rules[: config.MAX_POLICY_CHARS]))
+    """The user's policy is the knowledge base. The default guidelines (plus the dashboard's
+    default facts) are used only when no policy is given."""
     if policy_document and (policy_document.get("text") or "").strip():
-        sources.append(rag_engine.Source(policy_document.get("name") or "Uploaded policy", policy_document["text"][: config.MAX_POLICY_CHARS]))
+        return [rag_engine.Source(policy_document.get("name") or "Uploaded policy", policy_document["text"][: config.MAX_POLICY_CHARS])]
+    sources = [rag_engine.Source("Default Brand Guidelines", config.guidelines_text())]
+    if policy_rules and policy_rules.strip():
+        sources.append(rag_engine.Source("Live rule checks", policy_rules[: config.MAX_POLICY_CHARS]))
     return sources
+
+
+def build_context(sources, document_text: str):
+    """Number every policy line, then send the whole policy if it fits, else retrieve via Qdrant.
+
+    Returns (context, retrieval_info, index) where index lists every numbered policy line.
+    """
+    index, numbered = [], []
+    for src in sources:
+        lines = policy_index.number_policy(src.text, src.name)
+        index += lines
+        numbered.append(rag_engine.Source(src.name, policy_index.numbered_text(lines)))
+    total = sum(len(s.text) for s in numbered)
+    if total <= config.POLICY_FULL_CHARS:
+        context = "\n\n".join(f"=== {s.name} ===\n{s.text}" for s in numbered)
+        return context, {"mode": "full-policy", "chunks": len(index), "sources": [s.name for s in numbered]}, index
+    context, info = rag_engine.retrieve(numbered, document_text)
+    return context, info, index
 
 
 def audit_text(*, text, title="Untitled", source="editor", policy_rules="", policy_document=None, tone_profile="Professional", model_factory=None, log_to_db=True):
     text = (text or "")[: config.MAX_DOCUMENT_CHARS]
     tone_profile = tone_profile if tone_profile in TONE_PROFILES else "Professional"
 
-    # Free-tier LLMs have small per-minute token budgets, so only the first part is sent.
-    llm_text = text[: config.LLM_MAX_DOC_CHARS]
-    truncated = len(text) > len(llm_text)
-
     sources = build_sources(policy_rules, policy_document)
-    context, retrieval = rag_engine.retrieve(sources, llm_text)
+    context, retrieval, index = build_context(sources, text[: config.LLM_MAX_DOC_CHARS])
+
+    # Free-tier LLMs have small per-minute token budgets: the policy context takes priority,
+    # the document gets the rest of the budget (at least 4,000 characters).
+    doc_budget = max(4000, min(config.LLM_MAX_DOC_CHARS, config.LLM_INPUT_BUDGET_CHARS - len(context)))
+    llm_text = text[:doc_budget]
+    truncated = len(text) > len(llm_text)
 
     report, model_used = brand_engine.run_audit(llm_text, title, context, tone_profile, model_factory=model_factory)
     tone_score = max(0, min(10, int(report.tone_score)))
-    findings = normalise(report, text)
+    findings = normalise(report, text, index)
     level, score = compute_risk(findings, tone_score)
     is_compliant = not any(f["verdict"] == "CONTRADICTED" for f in findings)
 
     result = {
         "title": title,
+        "policy_used": (policy_document or {}).get("name") or "Default Brand Guidelines",
         "model": model_used,
         "truncated": truncated,
         "audited_chars": len(llm_text),

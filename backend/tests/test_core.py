@@ -85,13 +85,13 @@ def test_audit_pipeline():
     r = audit_service.audit_text(text=DOC, title="Proposal", model_factory=lambda p, n: FakeModel(p, n), log_to_db=False)
     f = {x["claim_text"]: x for x in r["findings"]}
     assert r["risk_level"] == "HIGH", r["risk_level"]
-    assert r["retrieval"]["mode"] == "full-context"
+    assert r["retrieval"]["mode"] == "full-policy"  # small policy -> every numbered line is sent
     assert f["PAN ABCDE1234F"]["located"] and f["PAN ABCDE1234F"]["suggested_rewrite"] == "PAN ABXXXXXX4F"
     assert f["50 MP camera"]["suggested_rewrite"] == "" and f["50 MP camera"]["severity"] == "none"
     assert "We guarantee instant results" in f  # exact casing recovered from the document
-    unlocated = [x for x in r["findings"] if not x["located"]]
-    assert len(unlocated) == 1 and unlocated[0]["suggested_rewrite"] == ""
-    assert r["counts"] == {"VERIFIED": 1, "UNVERIFIED": 2, "CONTRADICTED": 2}, r["counts"]
+    assert all(x["located"] for x in r["findings"])  # spans not in the document are dropped
+    assert r["counts"] == {"VERIFIED": 1, "UNVERIFIED": 1, "CONTRADICTED": 2}, r["counts"]
+    assert r["policy_used"] == "Default Brand Guidelines"
     assert r["db_logged"] is False and FakeModel.calls == ["model-a"] and r["model"] == "model-a · Groq"
     assert r["truncated"] is False
 
@@ -172,6 +172,30 @@ def test_retired_groq_models_are_skipped():
     finally:
         brand_engine.groq_available_models = original
         config.GROQ_MODELS = ["model-a", "model-b"]
+
+
+def test_user_policy_replaces_default_guidelines():
+    src = audit_service.build_sources("rules", {"name": "ACME policy.pdf", "text": "Never say synergy."})
+    assert [x.name for x in src] == ["ACME policy.pdf"]
+    assert [x.name for x in audit_service.build_sources("", None)] == ["Default Brand Guidelines"]
+
+
+def test_findings_cite_the_policy_line():
+    policy = {"name": "ACME.pdf", "text": "[Page 1]\nACME RULES\n1. Never publish personal identifiers such as PAN.\n[Page 2]\n2. Absolute guarantees are prohibited."}
+    cited = json.loads(json.dumps(CANNED))
+    cited["findings"][0].update(policy_reference="p.1 L2", policy_quote="Never publish personal identifiers such as PAN", recommendation="Mask IDs.")
+    cited["findings"][2].update(policy_reference="p.9 L9", policy_quote="")  # wrong label, no quote
+    r = audit_service.audit_text(
+        text=DOC, title="P", policy_document=policy, log_to_db=False,
+        model_factory=lambda p, n: FakeModel(p, n, reply=json.dumps(cited)),
+    )
+    f = {x["claim_text"]: x for x in r["findings"]}
+    pan = f["PAN ABCDE1234F"]
+    assert pan["policy_ref"]["page"] == 1 and pan["policy_ref"]["line"] == 2 and pan["policy_ref"]["verified"], pan
+    assert pan["source_reference"] == "ACME.pdf, p.1 line 2" and pan["recommendation"] == "Mask IDs."
+    assert pan["policy_quote"].startswith("1. Never publish")
+    assert f["We guarantee instant results"]["policy_ref"] is None  # bad label is not invented into a citation
+    assert r["policy_used"] == "ACME.pdf"
 
 
 def test_chunks_keep_pages():

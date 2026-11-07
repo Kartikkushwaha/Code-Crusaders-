@@ -33,9 +33,15 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip()
 GEMINI_FALLBACK_MODELS = _csv("GEMINI_FALLBACK_MODELS", "gemini-flash-latest")
 
 LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
-LLM_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "2500"))
+LLM_MAX_OUTPUT_TOKENS = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "3000"))
 # Groq's free tier allows ~8-12K tokens/minute per model, so the text sent to the LLM is capped.
 LLM_MAX_DOC_CHARS = int(os.getenv("LLM_MAX_DOC_CHARS", "9000"))
+# Policies up to this size are sent to the model in FULL (every numbered line), so it reviews
+# the whole policy. Larger ones go through Qdrant retrieval.
+POLICY_FULL_CHARS = int(os.getenv("POLICY_FULL_CHARS", "9000"))
+# Total characters (policy context + document) per request; keeps Groq free-tier requests
+# (input + output tokens) under its per-minute limit. The document is trimmed first.
+LLM_INPUT_BUDGET_CHARS = int(os.getenv("LLM_INPUT_BUDGET_CHARS", "16000"))
 
 # ---- Embeddings (retrieval). Optional: if they fail, the full approved text is used. ----
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001").strip()

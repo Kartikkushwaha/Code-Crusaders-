@@ -50,6 +50,12 @@ Alternatively, use `render.yaml` in the repo root (Blueprint deploy).
    - **Model order:** the `GROQ_MODELS` that Groq still serves (checked live through its `/models` endpoint), then `GEMINI_MODEL` and `GEMINI_FALLBACK_MODELS`. Any failure moves on to the next model.
    - **Reading the reply:** models are asked for plain JSON (JSON mode). The reply is parsed leniently: code fences and `<think>` blocks are stripped, a truncated reply is repaired, and near-miss values are normalised.
    - **Length limit:** Groq's free tier allows only a few thousand tokens per minute, so the first `LLM_MAX_DOC_CHARS` (9,000) characters are audited. The dashboard says so when it trims a document.
+3b. **Policy review and citations (v2.2):**
+   - **Line numbers:** every policy line is numbered (`[p.2 L14]`, see `policy_index.py`). Policies up to `POLICY_FULL_CHARS` (9,000) characters are sent to the model **in full**, so it reviews every rule. Longer policies go through Qdrant retrieval, and the numbered labels are kept inside the chunks.
+   - **What each finding contains:** the problem, `policy_reference` (the line label), `policy_quote` (the policy's exact words), the solution (`suggested_rewrite`) and a `recommendation`.
+   - **Citation check:** the backend matches the quote against the real policy lines and returns `policy_ref = {source, page, line, text, verified}`. It never invents a citation.
+   - **Which policy is used:** when the dashboard sends a policy, it is the only knowledge base. `brand_guidelines.txt` is used only when no policy is given.
+   - **Capitals:** words in capitals used for emphasis are not flagged unless the policy forbids capitals.
 4. **Normalisation:** each claim is located in the document so the dashboard can highlight it and apply the fix. Rewrites are dropped for Verified claims and for spans that can't be found. Risk is then computed and the result is logged to Neon.
 
 ## Changes from the Round 2 draft

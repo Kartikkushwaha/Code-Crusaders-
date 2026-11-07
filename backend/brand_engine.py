@@ -34,6 +34,9 @@ class ClaimFinding(BaseModel):
     explanation: str
     source_reference: str
     suggested_rewrite: str = ""
+    policy_reference: str = ""  # e.g. "p.2 L14" - the line label from the numbered policy
+    policy_quote: str = ""  # the policy line's words, verbatim
+    recommendation: str = ""  # one practical next step
 
 
 class AuditReport(BaseModel):
@@ -48,43 +51,64 @@ class AuditReport(BaseModel):
 
 # --------------------------------------------------------------------------- prompt
 AUDIT_SYSTEM = """You are PUBLIVRA AI, an enterprise brand-governance and claim-verification auditor.
-You review content BEFORE publication against the organisation's APPROVED SOURCES only.
+You review content BEFORE publication against the organisation's POLICY below and nothing else.
 
-Rules:
-1. Use ONLY the APPROVED SOURCES below as evidence. Never use outside knowledge to mark something VERIFIED.
-2. UNVERIFIED is the default for any claim, figure or comparison not confirmed by an approved source.
-3. CONTRADICTED when the content breaks a rule (restricted term, absolute guarantee, personal data,
-   limit exceeded, wrong tone) or when an approved source states a different value.
-4. VERIFIED only when an approved source explicitly confirms it; cite that source label.
-5. claim_text MUST be copied exactly, character for character, from the document (2-20 words).
-6. suggested_rewrite replaces claim_text only, keeps the creator's message and removes the violation.
-   Do not invent facts: if no approved figure exists, soften or remove the number. Empty for VERIFIED.
-7. Required tone profile: __TONE__. Score tone_score (0-10) against it.
-8. Report each distinct issue once, at most 20 findings. Keep each explanation under 25 words.
+HOW TO WORK
+Step 1 - Read the WHOLE policy first. Every policy line starts with its label in brackets, for example
+         [p.2 L14] (page 2, line 14) or [L5]. Note every rule: banned or required words, tone, claims,
+         numbers, privacy, timelines, formatting, audience rules.
+Step 2 - Read the document sentence by sentence and check it against EVERY policy rule.
+Step 3 - Report each real problem once (at most 15 findings).
+
+VERDICTS
+- CONTRADICTED: the document breaks a policy rule, or the policy states a different fact/value.
+- UNVERIFIED: a claim, figure or comparison the policy does not confirm (this is the default for claims).
+- VERIFIED: the policy explicitly confirms the claim (quote the confirming line).
+Always also apply these universal rules: never publish personal identifiers (PAN, Aadhaar, phone,
+personal email) or credentials; absolute guarantees ("guarantee", "100%", "zero risk") are not allowed.
+
+IMPORTANT
+- Judge ONLY the document text as it is now. claim_text MUST be copied exactly from the document (2-20 words).
+  Never report something that is not literally in the document (e.g. examples inside the policy, or fixed issues).
+- Words in capitals used for emphasis (e.g. "NEW employers") are normal and NOT a problem, unless the policy
+  explicitly forbids capitals or a whole sentence is written in capitals.
+- Required tone profile: __TONE__ (unless the policy states a different tone). Score tone_score 0-10 against it.
+- If the document has no problems, return "findings": [], "is_compliant": true and "recommendations": [].
+
+FOR EACH FINDING
+- explanation: the PROBLEM - what in the document is wrong and why, according to the policy (max 35 words).
+- policy_reference: the bracket label of the policy line you rely on, e.g. "p.2 L14". Empty only if no line applies.
+- policy_quote: the words of that policy line, copied verbatim (max 30 words).
+- suggested_rewrite: the SOLUTION - replacement text for claim_text only, keeping the writer's intent and fixing
+  the problem. Never invent facts; if the policy gives no figure, soften or remove the number. Empty for VERIFIED.
+- recommendation: one practical step for the writer (max 20 words).
 
 Respond with ONLY a JSON object, no markdown, in exactly this shape:
 {
   "is_compliant": false,
   "overall_tone": "Professional | Promotional | Exaggerated | Casual | Formal",
   "tone_score": 7,
-  "summary": "2-3 sentence executive summary",
+  "summary": "2-3 sentences about THIS document, naming the policy rules it breaks",
   "findings": [
     {
       "claim_text": "exact span from the document",
       "category": "Facts & claims | Terminology | Tone | Privacy | Timeline | Messaging",
       "verdict": "VERIFIED | UNVERIFIED | CONTRADICTED",
       "severity": "high | medium | low | none",
-      "explanation": "why, naming the rule or fact",
-      "source_reference": "source label from the context, or No approved source",
-      "suggested_rewrite": "replacement for claim_text, or empty string"
+      "explanation": "the problem, according to the policy",
+      "policy_reference": "p.2 L14",
+      "policy_quote": "exact words of that policy line",
+      "source_reference": "policy name",
+      "suggested_rewrite": "replacement for claim_text, or empty string",
+      "recommendation": "one practical next step"
     }
   ],
   "forbidden_terms": ["restricted terms found verbatim"],
-  "recommendations": ["up to 5 short editorial recommendations"]
+  "recommendations": ["up to 5 document-specific actions, each citing its policy line, e.g. 'Replace \"deals\" (p.1 L3)'"]
 }
 Severity: high = legal/privacy/absolute guarantee, medium = factual or policy mismatch, low = tone/terminology, none = verified.
 
-APPROVED SOURCES (each chunk prefixed with its source label):
+POLICY (every line numbered):
 __CONTEXT__
 """
 
@@ -209,9 +233,12 @@ def coerce_report(d: dict) -> AuditReport:
                 category=_category(str(f.get("category") or f.get("type") or "")),
                 verdict=verdict,
                 severity=_severity(str(f.get("severity") or f.get("risk") or ""), verdict),
-                explanation=str(f.get("explanation") or f.get("reason") or "").strip() or "Flagged by the AI audit.",
+                explanation=str(f.get("explanation") or f.get("problem") or f.get("reason") or "").strip() or "Flagged by the AI audit.",
                 source_reference=str(f.get("source_reference") or f.get("source") or "No approved source").strip(),
-                suggested_rewrite="" if verdict == "VERIFIED" else str(f.get("suggested_rewrite") or f.get("rewrite") or f.get("fix") or "").strip(),
+                suggested_rewrite="" if verdict == "VERIFIED" else str(f.get("suggested_rewrite") or f.get("rewrite") or f.get("fix") or f.get("solution") or "").strip(),
+                policy_reference=str(f.get("policy_reference") or f.get("policy_line") or f.get("line") or f.get("clause") or "").strip(),
+                policy_quote=str(f.get("policy_quote") or f.get("quote") or f.get("policy_text") or f.get("rule") or "").strip(),
+                recommendation=str(f.get("recommendation") or f.get("advice") or "").strip(),
             )
         )
     comp = d.get("is_compliant")
