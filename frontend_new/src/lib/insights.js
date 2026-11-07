@@ -3,7 +3,8 @@
 // 2. ISSUE_GROUPS / groupFindings() - turns raw findings into "top issues" a person can act on
 // 3. COMMON_MISTAKES - the pitfalls shown on the start screen
 
-import { DEFAULT_POLICY, TONE_PROFILES } from "../data/defaultPolicy.js";
+import { CORE_POLICY, DEFAULT_POLICY, TONE_PROFILES } from "../data/defaultPolicy.js";
+import { numberPolicy } from "./policyLines.js";
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
 // A quoted phrase; double quotes may contain apostrophes ("world's best").
@@ -12,66 +13,135 @@ const pick = (m, from) => m.slice(from, from + 4).find((x) => x !== undefined);
 
 /**
  * Read plain policy text and extract rules the live engine can enforce.
+ * Each rule remembers the policy line it came from ({ page, line, text }) so findings
+ * can quote the policy and the viewer can jump to that line.
  * Conservative on purpose: anything it cannot read reliably is still sent to the AI audit.
  */
-export function derivePolicy(text, base = DEFAULT_POLICY) {
-  const policy = clone(base);
+export function derivePolicy(text, base) {
+  // No policy -> PUBLIVRA defaults. A user policy -> only universal safety checks + its own rules.
+  const policy = clone(base || (text ? CORE_POLICY : DEFAULT_POLICY));
+  policy.refs = policy.refs || {};
   const detected = [];
   if (!text) return { policy, detected };
-  const flat = text.replace(/\s+/g, " ");
+
+  const lines = numberPolicy(text);
+  // Each line on its own, then each line joined with the next (rules split across lines).
+  const windows = lines.map((l) => ({ text: l.text, ref: l }));
+  lines.forEach((l, i) => {
+    const next = lines[i + 1];
+    if (next && next.page === l.page) windows.push({ text: `${l.text} ${next.text}`, ref: l });
+  });
+
   const known = new Set(policy.bannedTerms.map((t) => t.term.toLowerCase()));
-  const addTerm = (term, replacement, label) => {
+  const addTerm = (term, replacement, label, ref) => {
     term = term.trim().replace(/[.,;:]$/, "");
     if (term.length < 3 || term.length > 40 || known.has(term.toLowerCase())) return;
     known.add(term.toLowerCase());
-    policy.bannedTerms.push({ term, replacement: (replacement || "").trim(), clause: "Your policy", severity: "medium" });
-    detected.push({ kind: "term", label });
+    policy.bannedTerms.push({ term, replacement: (replacement || "").trim(), clause: "Your policy", severity: "medium", ref });
+    detected.push({ kind: "term", label, ref });
   };
 
-  // Use "A" instead of "B"
   const insteadRe = new RegExp(`use\\s+${QUOTED}\\s+(?:instead of|rather than|in place of)\\s+${QUOTED}`, "gi");
-  for (const m of flat.matchAll(insteadRe)) {
-    const good = pick(m, 1), bad = pick(m, 5);
-    addTerm(bad, good, `"${bad}" → "${good}"`);
-  }
-
-  // Replace "B" with "A"
   const replaceRe = new RegExp(`replace\\s+${QUOTED}\\s+with\\s+${QUOTED}`, "gi");
-  for (const m of flat.matchAll(replaceRe)) {
-    const bad = pick(m, 1), good = pick(m, 5);
-    addTerm(bad, good, `"${bad}" → "${good}"`);
-  }
-
-  // Avoid / do not use / restricted / banned: "x", "y" ...
   const listRe = new RegExp(
-    `(?:avoid|do not use|don't use|never use|must not use|prohibited|banned|restricted|forbidden)[^.!?"“'‘]{0,40}((?:${QUOTED}[\\s,;/]*(?:and|or)?\\s*){1,12})`,
+    // keyword, optional "words/terms/hype or buzzwords like", then the quoted list - nothing else in between
+    `(?:avoid|do not use|don't use|never use|must not use|prohibited|banned|restricted|forbidden)(?:\\s+(?:the\\s+)?(?:words?|terms?|phrases?|buzzwords?|vocabulary|hype|jargon)(?:\\s+or\\s+[a-z]+)?(?:\\s+(?:like|such as|including))?)?[\\s:,-]*((?:${QUOTED}[\\s,;/]*(?:and|or)?\\s*){1,12})`,
     "gi",
   );
-  for (const m of flat.matchAll(listRe)) {
-    for (const q of m[1].matchAll(new RegExp(QUOTED, "g"))) {
-      const term = pick(q, 1);
-      addTerm(term, "", `"${term}" not allowed`);
+  const daysRe = /(?:deliver|timeline|turnaround|schedule|completion|phase)[^.]{0,80}?(?:not exceed|maximum(?: of)?|max\.?|no more than|within|up to|at most)\s+(\d{1,3})\s*(?:calendar |business |working )?days/i;
+  const toneRe = /tone[^.]{0,80}?\b(formal|friendly|professional)\b/i;
+  const capsRe = /(?:avoid|do not use|don't use|never use|no|must not use|prohibited)[^.]{0,30}\b(?:all[- ]?caps|capital letters|capitals|upper[- ]?case)\b/i;
+
+  for (const w of windows) {
+    // Use "A" instead of "B"
+    for (const m of w.text.matchAll(insteadRe)) {
+      const good = pick(m, 1), bad = pick(m, 5);
+      addTerm(bad, good, `"${bad}" → "${good}"`, w.ref);
+    }
+    // Replace "B" with "A"
+    for (const m of w.text.matchAll(replaceRe)) {
+      const bad = pick(m, 1), good = pick(m, 5);
+      addTerm(bad, good, `"${bad}" → "${good}"`, w.ref);
+    }
+    // Avoid / do not use / restricted / banned: "x", "y" ...
+    for (const m of w.text.matchAll(listRe)) {
+      for (const q of m[1].matchAll(new RegExp(QUOTED, "g"))) {
+        const term = pick(q, 1);
+        addTerm(term, "", `"${term}" not allowed`, w.ref);
+      }
+    }
+    // Delivery / timeline limit
+    const days = !policy.refs.maxDeliveryDays && w.text.match(daysRe);
+    if (days && Number(days[1]) > 0) {
+      policy.maxDeliveryDays = Number(days[1]);
+      policy.refs.maxDeliveryDays = w.ref;
+      detected.push({ kind: "limit", label: `Timelines ≤ ${days[1]} days`, ref: w.ref });
+    }
+    // Tone
+    const tone = !policy.refs.tone && w.text.match(toneRe);
+    if (tone) {
+      const t = tone[1][0].toUpperCase() + tone[1].slice(1).toLowerCase();
+      if (TONE_PROFILES[t]) {
+        policy.tone = t;
+        policy.refs.tone = w.ref;
+        detected.push({ kind: "tone", label: `${t} tone`, ref: w.ref });
+      }
+    }
+    // Capitals explicitly banned
+    if (!policy.forbidCaps && capsRe.test(w.text)) {
+      policy.forbidCaps = true;
+      policy.refs.forbidCaps = w.ref;
+      detected.push({ kind: "caps", label: "No all-caps words", ref: w.ref });
     }
   }
 
-  // Delivery / timeline limit
-  const days = flat.match(/(?:deliver|timeline|turnaround|schedule|completion|phase)[^.]{0,80}?(?:not exceed|maximum(?: of)?|max\.?|no more than|within|up to|at most)\s+(\d{1,3})\s*(?:calendar |business |working )?days/i);
-  if (days && Number(days[1]) > 0) {
-    policy.maxDeliveryDays = Number(days[1]);
-    detected.push({ kind: "limit", label: `Timelines ≤ ${days[1]} days` });
-  }
-
-  // Tone
-  const tone = flat.match(/tone[^.]{0,80}?\b(formal|friendly|professional)\b/i);
-  if (tone) {
-    const t = tone[1][0].toUpperCase() + tone[1].slice(1).toLowerCase();
-    if (TONE_PROFILES[t]) {
-      policy.tone = t;
-      detected.push({ kind: "tone", label: `${t} tone` });
-    }
-  }
+  // Tables: "Restricted term | Approved alternative | Reason" (Word tables extracted with " | ").
+  parseTermTables(lines, addTerm);
 
   return { policy, detected };
+}
+
+const HEADER_BAD = /restricted|forbidden|banned|prohibited|avoid|don'?t use|do not use|flag/i;
+const HEADER_GOOD = /approved|alternative|suggest|instead|replacement|use/i;
+const NO_REPLACEMENT = /\b(remove|omit|rephrase|delete|avoid|n\/a|none)\b/i;
+
+function parseTermTables(lines, addTerm) {
+  let inTable = false;
+  let tablePage = null; // page of the current table
+  let carry = ""; // first cell that wrapped onto the previous line ("Incentive, Fee," + "Budgets, KPIs | ...")
+  lines.forEach((l, i) => {
+    const cells = l.text.split(" | ").map((c) => c.trim()).filter(Boolean);
+    if (cells.length >= 2 && HEADER_BAD.test(cells[0]) && HEADER_GOOD.test(cells[1])) {
+      inTable = true;
+      tablePage = l.page;
+      carry = "";
+      return;
+    }
+    if (!inTable) return;
+    if (l.page !== tablePage || /^\d+(\.\d+)*\.?\s+[A-Z]/.test(l.text)) {
+      inTable = false; // next section heading or new page ends the table
+      return;
+    }
+    if (cells.length < 2) {
+      const next = lines[i + 1];
+      if (/,$/.test(l.text) && next && next.text.includes(" | ")) carry = `${l.text} `;
+      return;
+    }
+    if (!carry && /^[a-z]/.test(cells[0])) return; // wrapped text from the row above, not a new row
+    const first = `${carry}${cells[0]}`;
+    carry = "";
+    const condition = (first.match(/\(([^)]+)\)/) || [])[1];
+    const alt = cells[1] || "";
+    const replacement = NO_REPLACEMENT.test(alt) ? "" : alt.split(/,|;| or /)[0].trim();
+    first
+      .replace(/\([^)]*\)/g, "")
+      .split(/[,;/]/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 2 && t.length <= 40 && !/^(and|or)$/i.test(t))
+      .forEach((term) =>
+        addTerm(term, replacement, replacement ? `"${term}" → "${replacement}"${condition ? ` (${condition})` : ""}` : `"${term}" not allowed`, l),
+      );
+  });
 }
 
 // ------------------------------------------------------------------ issue groups

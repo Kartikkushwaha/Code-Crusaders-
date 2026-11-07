@@ -87,7 +87,24 @@ const CASUAL_REPLACE = {
   lol: "", cool: "useful", stuff: "material", folks: "everyone", hey: "hello", guys: "everyone",
   kinda: "somewhat", totally: "",
 };
-const ACRONYM_OK = new Set(["PUBLIVRA", "NEXUS", "CCPA", "ASCI", "GDPR", "WCAG", "ISO", "SLA", "API"]);
+const ACRONYM_OK = new Set(["PUBLIVRA", "NEXUS", "CCPA", "ASCI", "GDPR", "WCAG", "ISO", "SLA", "API", "LINKEDIN", "HTML", "NASDAQ", "SEBI", "ESG"]);
+
+/**
+ * Capitals used to highlight a word ("NEW employers") are normal emphasis, not shouting.
+ * Only a sentence written mostly in capitals counts as shouting, unless the policy itself
+ * forbids all-caps words (policy.forbidCaps).
+ */
+export function isShouting(sentence) {
+  const words = (sentence.match(/[A-Za-z][A-Za-z'-]*/g) || []).filter((w) => w.length > 1);
+  if (words.length < 4) return false;
+  const caps = words.filter((w) => w === w.toUpperCase() && !ACRONYM_OK.has(w));
+  return caps.length >= 4 && caps.length / words.length >= 0.7;
+}
+
+function sentenceCase(sentence) {
+  const lower = sentence.replace(/[A-Za-z][A-Za-z'-]*/g, (w) => (ACRONYM_OK.has(w) ? w : w.toLowerCase()));
+  return lower.replace(/^([^A-Za-z]*)([a-z])/, (_, a, b) => a + b.toUpperCase());
+}
 
 const METRIC_RE = /(?:₹\s?\d[\d,]*(?:\.\d+)?\s*(?:lakh|crore|k|cr)?|\b\d+(?:\.\d+)?\s*(?:%|x(?![A-Za-z])|times\b|MP\b|mAh\b|hours?\b|hrs?\b|minutes?\b|mins?\b|GB\b|TB\b|ms\b|seconds?\b))/gi;
 const COMPARATIVE_RE = /^\s*(?:faster|better|more|less|cheaper|higher|lower|quicker|greater|fewer)\b/i;
@@ -101,6 +118,8 @@ function caseLike(src, repl) {
   if (!repl) return repl;
   if (src.length > 1 && src === src.toUpperCase() && /[A-Z]/.test(src)) return repl.toLowerCase();
   if (src[0] === src[0].toUpperCase() && /[a-z]/i.test(src[0])) return repl[0].toUpperCase() + repl.slice(1);
+  // lower-case source word: lower-case the replacement's first letter too ("clients" -> "partners"), keep acronyms
+  if (/[a-z]/.test(src[0]) && /^[A-Z][a-z]/.test(repl)) return repl[0].toLowerCase() + repl.slice(1);
   return repl;
 }
 
@@ -150,7 +169,9 @@ export function auditTone(text, policy) {
   const hype = countMatches(text, HYPE_WORDS);
   const casual = countMatches(text, CASUAL_WORDS);
   const exclamations = (text.match(/!/g) || []).length;
-  const caps = (text.match(/\b[A-Z]{5,}\b/g) || []).filter((w) => !ACRONYM_OK.has(w));
+  const shouting = splitSentences(text).filter(isShouting);
+  const capsWords = policy?.forbidCaps ? (text.match(/\b[A-Z]{4,}\b/g) || []).filter((w) => !ACRONYM_OK.has(w)) : [];
+  const caps = [...shouting.map((s) => (s.length > 40 ? s.slice(0, 40) + "…" : s)), ...capsWords];
   const contractions = (text.match(/\b\w+n't\b|\b\w+'(?:re|ve|ll)\b/gi) || []).length;
   const words = (text.match(/\b\w+\b/g) || []).length;
 
@@ -210,7 +231,11 @@ function auditSentence(sentence, policy, tone) {
   [...policy.bannedTerms]
     .sort((a, b) => b.term.length - a.term.length)
     .forEach((bt) => {
-      for (const m of sentence.matchAll(phraseRe(bt.term))) {
+      // also match simple plurals: "client" -> "clients", "deal" -> "deals"
+      const termRe = /[A-Za-z]$/.test(bt.term)
+        ? new RegExp(`${/^[A-Za-z0-9]/.test(bt.term) ? "(?<![A-Za-z0-9])" : ""}${escapeRe(bt.term)}(?:e?s)?(?![A-Za-z0-9'’])`, "gi")
+        : phraseRe(bt.term);
+      for (const m of sentence.matchAll(termRe)) {
         const s = m.index, e = s + m[0].length;
         if (overlaps(taken, s, e)) continue;
         take(s, e);
@@ -219,10 +244,20 @@ function auditSentence(sentence, policy, tone) {
           category: bt.clause?.startsWith("CLAIMS") ? "Facts & claims" : "Terminology",
           match: m[0], offset: s, clause: bt.clause,
           explanation: bt.replacement
-            ? `"${m[0]}" is restricted by ${bt.clause}. Approved wording: "${bt.replacement}".`
-            : `"${m[0]}" is not allowed by ${bt.clause}. Rephrase this part.`,
+            ? bt.ref
+              ? `Your policy asks for "${bt.replacement}" instead of "${m[0]}".`
+              : `"${m[0]}" is restricted by ${bt.clause}. Approved wording: "${bt.replacement}".`
+            : bt.ref
+              ? `Your policy does not allow "${m[0]}". Rephrase this part without it.`
+              : `"${m[0]}" is not allowed by ${bt.clause}. Rephrase this part.`,
           source: bt.clause === "Your policy" ? "Your uploaded policy" : `Brand Guidelines · ${bt.clause}`,
-          suggestion: bt.replacement ? { find: m[0], replace: caseLike(m[0], bt.replacement) } : null,
+          suggestion: bt.replacement
+            ? {
+                find: m[0],
+                replace: caseLike(m[0], bt.replacement) + (/s$/i.test(m[0]) && !/s$/i.test(bt.term) && !/s$/i.test(bt.replacement) && !bt.replacement.includes(" ") ? "s" : ""),
+              }
+            : null,
+          policyRef: bt.ref || null,
         });
       }
     });
@@ -244,7 +279,7 @@ function auditSentence(sentence, policy, tone) {
   });
 
   // 4. Delivery timelines vs. policy limit.
-  if (/deliver|schedule|timeline|phase|complete|turnaround|handover/i.test(sentence)) {
+  if (policy.maxDeliveryDays && /deliver|schedule|timeline|phase|complete|turnaround|handover/i.test(sentence)) {
     for (const m of sentence.matchAll(/(\d+)\s*(?:calendar\s+|business\s+|working\s+)?days?\b/gi)) {
       const n = Number(m[1]);
       const s = m.index, e = s + m[0].length;
@@ -257,6 +292,7 @@ function auditSentence(sentence, policy, tone) {
           explanation: `Timeline of ${n} days exceeds the maximum permitted limit of ${policy.maxDeliveryDays} calendar days.`,
           source: "Global Policy · POL-01",
           suggestion: { find: m[0], replace: m[0].replace(m[1], String(policy.maxDeliveryDays)) },
+          policyRef: policy.refs?.maxDeliveryDays || null,
         });
       } else {
         add("timeline-ok", {
@@ -355,6 +391,7 @@ function auditSentence(sentence, policy, tone) {
         match: m[0], offset: s, clause: `Tone · ${tone.profile}`,
         explanation: why(m[0]),
         source: tone.usingFallback ? "Default internal compliance tone" : "Custom policy tone rule",
+        policyRef: policy.refs?.tone || null,
         suggestion: { find: m[0], replace: toFn(m[0]) },
       });
     }
@@ -367,13 +404,23 @@ function auditSentence(sentence, policy, tone) {
       toneRule("tone-casual", phraseRe(w), (m) => caseLike(m, CASUAL_REPLACE[w] ?? ""),
         (m) => `Casual expression "${m}" does not fit a ${tone.profile.toLowerCase()} persona.`));
   }
-  if (tone.weights.caps > 0) {
-    toneRule("tone-caps", /\b[A-Z]{5,}\b/g, (m) => (ACRONYM_OK.has(m) ? m : m.toLowerCase()),
-      (m) => `"${m}" in all caps reads as shouting.`);
-    // drop acronym false positives
+  if (tone.weights.caps > 0 && policy.forbidCaps) {
+    // The user's policy explicitly bans capitals, so single words count too.
+    toneRule("tone-caps", /\b[A-Z]{4,}\b/g, (m) => (ACRONYM_OK.has(m) ? m : m.toLowerCase()),
+      (m) => `"${m}" is written in capitals, which your policy does not allow.`);
     for (let i = findings.length - 1; i >= 0; i--) {
       if (findings[i].ruleKey === "tone-caps" && ACRONYM_OK.has(findings[i].match)) findings.splice(i, 1);
     }
+    findings.forEach((f) => f.ruleKey === "tone-caps" && (f.policyRef = policy.refs?.forbidCaps || null));
+  } else if (tone.weights.caps > 0 && isShouting(sentence)) {
+    // Whole sentence in capitals reads as shouting. Single highlighted words are fine.
+    add("tone-shout", {
+      verdict: VERDICT.CONTRADICTED, severity: "low", category: "Tone",
+      match: sentence, offset: 0, clause: `Tone · ${tone.profile}`,
+      explanation: "This whole sentence is in capitals, which reads as shouting. Capitalising one or two words for emphasis is fine.",
+      source: tone.usingFallback ? "Default internal compliance tone" : "Your policy's tone rule",
+      suggestion: { find: sentence, replace: sentenceCase(sentence) },
+    });
   }
   if (tone.weights.exclamation >= 0.5) {
     toneRule("tone-exclaim", /!+/g, () => ".", () => "Exclamation marks read as sensational in brand copy.");
@@ -544,21 +591,25 @@ export function parsePolicyText(raw, base) {
 /** Serialise the active rules so the backend can index it as an approved source. */
 export function policyToText(policy) {
   const tone = resolveTone(policy);
+  const section = (title, rows) => (rows.length ? ["", title, ...rows] : []);
   const lines = [
-    `[POLICY LIBRARY: ${policy.name}]`,
+    `[ACTIVE RULES: ${policy.name}]`,
     `Required tone: ${tone.profile}${tone.usingFallback ? " (default internal compliance tone)" : ""} - ${tone.description}`,
-    `POL-01 Delivery limits: delivery timelines must not exceed ${policy.maxDeliveryDays} calendar days.`,
-    "Clause 1.1 Data Privacy: never publish PAN, Aadhaar, phone numbers, personal emails, credentials or API keys.",
-    "Clause 2 Claims & Guarantees: absolute guarantees (guarantee, risk-free, zero downtime, 100% ...) are prohibited without an SLA.",
-    "",
-    "Restricted terminology (restricted => approved replacement):",
-    ...policy.bannedTerms.map((t) => `- "${t.term}" => "${t.replacement}" (${t.clause}, ${t.severity} severity)`),
-    "",
-    "Approved facts (only these figures are VERIFIED):",
-    ...policy.approvedFacts.map((f) => `- ${f.id} ${f.label}: ${f.value}${f.unit === "%" || f.unit === "+" ? "" : " "}${f.unit} [source: ${f.source}]`),
-    "",
-    "Approved statements:",
-    ...policy.approvedStatements.map((s) => `- ${s.id} "${s.text}" - ${s.label} [source: ${s.source}]`),
+    ...(policy.maxDeliveryDays ? [`Delivery limits: delivery timelines must not exceed ${policy.maxDeliveryDays} calendar days.`] : []),
+    "Data privacy: never publish PAN, Aadhaar, phone numbers, personal emails, credentials or API keys.",
+    "Claims & guarantees: absolute guarantees (guarantee, risk-free, zero downtime, 100% ...) are prohibited without an SLA.",
+    ...section(
+      "Restricted terminology (restricted => approved replacement):",
+      policy.bannedTerms.map((t) => `- "${t.term}" => ${t.replacement ? `"${t.replacement}"` : "(not allowed)"} (${t.clause})`),
+    ),
+    ...section(
+      "Approved facts (only these figures are VERIFIED):",
+      policy.approvedFacts.map((f) => `- ${f.id} ${f.label}: ${f.value}${f.unit === "%" || f.unit === "+" ? "" : " "}${f.unit} [source: ${f.source}]`),
+    ),
+    ...section(
+      "Approved statements:",
+      policy.approvedStatements.map((s) => `- ${s.id} "${s.text}" - ${s.label} [source: ${s.source}]`),
+    ),
   ];
   return lines.join("\n");
 }

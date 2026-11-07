@@ -6,6 +6,8 @@ import TopBar from "./components/TopBar.jsx";
 import StartScreen from "./components/StartScreen.jsx";
 import PolicyBar from "./components/PolicyBar.jsx";
 import TopIssues from "./components/TopIssues.jsx";
+import PolicyViewer from "./components/PolicyViewer.jsx";
+import { DEFAULT_GUIDELINES } from "./data/defaultGuidelines.js";
 import RichTextEditor from "./components/RichTextEditor.jsx";
 import AnalyticsPanel from "./components/AnalyticsPanel.jsx";
 import RiskBanner from "./components/RiskBanner.jsx";
@@ -23,6 +25,16 @@ import { parseUpload } from "./lib/fileParser.js";
 import { buildPublicationPdf, domToBlocks, downloadBlob, slugify } from "./lib/pdfExport.js";
 
 let uid = 0;
+const POLICY_KEY = "publivra.policy.v1";
+function loadSavedPolicy() {
+  try {
+    const raw = localStorage.getItem(POLICY_KEY);
+    const doc = raw ? JSON.parse(raw) : null;
+    return doc && typeof doc.text === "string" && doc.text.trim() ? doc : null;
+  } catch {
+    return null;
+  }
+}
 const nextId = (p) => `${p}-${Date.now().toString(36)}-${(uid++).toString(36)}`;
 
 export default function App() {
@@ -45,10 +57,34 @@ export default function App() {
   const [analysis, setAnalysis] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [dismissed, setDismissed] = useState({});
-  const [policyDoc, setPolicyDoc] = useState(null); // uploaded policy: sent to the AI audit + mined for live rules
-  const policyInfo = useMemo(() => derivePolicy(policyDoc?.text), [policyDoc]);
+  // Uploaded/pasted policy: sent to the AI audit + mined for live rules.
+  // Kept between checks (and across reloads) until the user uploads a new one or removes it.
+  const [policyDoc, setPolicyDocState] = useState(loadSavedPolicy);
+  const setPolicyDoc = useCallback((doc) => {
+    setPolicyDocState(doc);
+    try {
+      if (doc) localStorage.setItem(POLICY_KEY, JSON.stringify(doc));
+      else localStorage.removeItem(POLICY_KEY);
+    } catch {
+      /* storage full or blocked: keep it for this session only */
+    }
+  }, []);
+  const policyInfo = useMemo(() => {
+    const info = derivePolicy(policyDoc?.text);
+    if (policyDoc) info.policy.name = policyDoc.name;
+    return info;
+  }, [policyDoc]);
   const policy = policyInfo.policy;
-  const [panelFocus, setPanelFocus] = useState(null); // { tab, group, n } - lets dashboard cards drive the panel
+  const [panelFocus, setPanelFocus] = useState(null);
+  const [viewer, setViewer] = useState(null); // { doc, target } for the policy viewer
+  const openPolicyRef = useCallback(
+    (ref) => {
+      const wantsDefault = ref?.source === DEFAULT_GUIDELINES.name || (!policyDoc && !ref?.source);
+      const doc = wantsDefault || !policyDoc ? DEFAULT_GUIDELINES : policyDoc;
+      setViewer({ doc, target: ref && ref.line ? { page: ref.page ?? null, line: ref.line } : null });
+    },
+    [policyDoc],
+  ); // { tab, group, n } - lets dashboard cards drive the panel
 
   // backend (FastAPI on Render)
   const [engine, setEngine] = useState({ status: "checking", info: null });
@@ -116,18 +152,29 @@ export default function App() {
     if (!res) return analysis;
     const sentences = new Set(analysis.sentences);
     const unchanged = text === ai.textAtRun;
-    const aiFindings = res.findings
-      .filter((f) => (f.located ? sentences.has(f.sentence) : unchanged))
-      .map(toUiFinding)
-      .filter((af) => {
-        const span = (af.match || "").toLowerCase();
-        return !analysis.findings.some((rf) => {
-          if (rf.sentence !== af.sentence) return false;
-          const m = (rf.match || "").toLowerCase();
-          return m && span && (span.includes(m) || m.includes(span));
-        });
-      });
-    return { ...analysis, findings: [...analysis.findings, ...aiFindings] };
+    const overlaps = (rf, af) => {
+      if (rf.sentence !== af.sentence) return false;
+      const m = (rf.match || "").toLowerCase();
+      const span = (af.match || "").toLowerCase();
+      return m && span && (span.includes(m) || m.includes(span));
+    };
+    const aiFindings = res.findings.filter((f) => (f.located ? sentences.has(f.sentence) : unchanged)).map(toUiFinding);
+    // Same issue found by both: keep the instant rule flag (and its one-click fix),
+    // but give it the AI's policy citation, quote and recommendation.
+    const ruleFindings = analysis.findings.map((rf) => {
+      const af = aiFindings.find((a) => overlaps(rf, a));
+      if (!af) return rf;
+      return {
+        ...rf,
+        aiConfirmed: true,
+        policyRef: rf.policyRef || af.policyRef,
+        policyQuote: rf.policyQuote || af.policyQuote,
+        recommendation: rf.recommendation || af.recommendation,
+        explanation: af.policyRef && !rf.policyRef ? af.explanation || rf.explanation : rf.explanation,
+      };
+    });
+    const aiOnly = aiFindings.filter((af) => !analysis.findings.some((rf) => overlaps(rf, af)));
+    return { ...analysis, findings: [...ruleFindings, ...aiOnly] };
   }, [analysis, ai, text]);
 
   const risk = useMemo(() => (merged ? computeRisk(merged.findings, merged.tone, dismissed) : null), [merged, dismissed]);
@@ -415,7 +462,7 @@ export default function App() {
         {/* Workspace stays mounted so the document survives navigation. */}
         <div className={view === "workspace" ? "" : "hidden"}>
           {!mode ? (
-            <StartScreen onStart={onStart} toast={toast} />
+            <StartScreen onStart={onStart} toast={toast} currentPolicy={policyDoc} />
           ) : (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -446,6 +493,7 @@ export default function App() {
                 onPolicy={changePolicy}
                 onRemovePolicy={() => changePolicy(null)}
                 onReplaceContent={() => replaceInputRef.current?.click()}
+                onViewPolicy={() => openPolicyRef(null)}
                 toast={toast}
               />
 
@@ -480,6 +528,7 @@ export default function App() {
                   onManualEdit={onManualEdit}
                   policyName={policyDoc ? policyDoc.name : "PUBLIVRA built-in rules"}
                   focus={panelFocus}
+                  onOpenRef={openPolicyRef}
                 />
               </div>
               <input
@@ -510,6 +559,7 @@ export default function App() {
           <AuditTrail
             publications={publications}
             activity={activity}
+            engine={engine}
             onOpenVerification={(id) => {
               setActivePubId(id);
               setView("verification");
@@ -527,6 +577,7 @@ export default function App() {
         findings={(merged?.findings ?? []).filter((f) => !dismissed[f.id])}
         defaultName={slugify(title)}
       />
+      <PolicyViewer open={!!viewer} onClose={() => setViewer(null)} doc={viewer?.doc} target={viewer?.target} />
       <Toasts toasts={toasts} dismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
     </div>
   );

@@ -29,13 +29,13 @@ export default function RiskBanner({ risk, onPublish, canPublish, scanning }) {
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-3">
-        <div className="grid grid-cols-3 gap-1.5 text-center">
+      <div className="flex w-full flex-col gap-3 sm:w-auto sm:shrink-0 sm:flex-row sm:items-center">
+        <div className="grid w-full grid-cols-3 gap-1.5 text-center sm:w-auto">
           <Count n={risk.counts.verified} label="Verified" cls="text-emerald-300" />
           <Count n={risk.counts.unverified} label="Unverified" cls="text-amber-300" />
           <Count n={risk.counts.contradicted} label="Contradicted" cls="text-rose-300" />
         </div>
-        <Button variant={risk.level === "HIGH" ? "danger" : "primary"} onClick={onPublish} disabled={!canPublish}>
+        <Button variant={risk.level === "HIGH" ? "danger" : "primary"} onClick={onPublish} disabled={!canPublish} className="w-full sm:w-auto">
           <Rocket className="h-4 w-4" /> Publish
         </Button>
       </div>
@@ -53,9 +53,9 @@ function headline(risk) {
 
 function Count({ n, label, cls }) {
   return (
-    <div className="rounded-lg bg-slate-950/50 px-2 py-1">
+    <div className="min-w-0 rounded-lg bg-slate-950/50 px-1.5 py-1 sm:min-w-[84px]">
       <div className={`text-base font-bold ${cls}`}>{n}</div>
-      <div className="text-[9px] uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="text-[9px] uppercase tracking-wide text-slate-500">{label}</div>
     </div>
   );
 }

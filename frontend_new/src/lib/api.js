@@ -40,6 +40,8 @@ export const api = {
   createPublication: (payload) => request("/api/publications", { method: "POST", body: payload }),
   verifyPublication: (id, payload) => request(`/api/publications/${id}/verify`, { method: "POST", body: payload }),
   logEvent: (payload) => request("/api/events", { method: "POST", body: payload }).catch(() => null),
+  listAudits: (limit = 50) => request(`/api/audits?limit=${limit}`, { timeout: 75000 }),
+  listPublications: (limit = 50) => request(`/api/publications?limit=${limit}`, { timeout: 75000 }),
 };
 
 /** Map a backend finding onto the shape the dashboard uses for rule findings. */
@@ -64,9 +66,13 @@ export function toUiFinding(f) {
     category: f.category,
     match: f.claim_text,
     offset: f.offset ?? 0,
-    clause: "AI · approved-source audit",
+    clause: "AI · policy audit",
     explanation: f.explanation,
     source: f.source_reference,
+    // { source, page, line, text, verified } - the policy line this finding relies on
+    policyRef: f.policy_ref || null,
+    policyQuote: f.policy_quote || f.policy_ref?.text || "",
+    recommendation: f.recommendation || "",
     suggestion,
   };
 }

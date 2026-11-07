@@ -8,7 +8,7 @@ export default function ToneAuditor({ tone }) {
     { label: "Hype / sensational words", value: sig.hype.reduce((a, b) => a + b.count, 0), detail: sig.hype.map((h) => h.word).join(", ") },
     { label: "Casual expressions", value: sig.casual.reduce((a, b) => a + b.count, 0), detail: sig.casual.map((h) => h.word).join(", ") },
     { label: "Exclamation marks", value: sig.exclamations },
-    { label: "ALL-CAPS words", value: sig.caps.length, detail: sig.caps.join(", ") },
+    { label: "Shouting (sentences in capitals)", value: sig.caps.length, detail: sig.caps.length ? sig.caps.join(" · ") : "Capitalised words for emphasis are fine" },
     { label: "Contractions", value: sig.contractions, detail: tone.profile === "Formal" ? "Not allowed in Formal" : "Allowed" },
   ];
 

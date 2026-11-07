@@ -169,27 +169,118 @@ export async function parseUpload(file, onProgress) {
   throw new Error("Unsupported file type. Upload a .pdf, .tex or .txt file.");
 }
 
+/** Join pdf.js text items into lines, putting " | " between table columns (wide horizontal gaps). */
+function itemsToText(items) {
+  let out = "";
+  let prevEnd = null; // x where the previous item ended on this line
+  for (const it of items) {
+    if (!("str" in it)) continue;
+    const x = it.transform?.[4] ?? 0;
+    const blank = !it.str.trim();
+    if (blank && it.width > 14) {
+      // a wide spacer item = a column gap
+      if (out && !out.endsWith("\n") && !out.endsWith(" | ")) out += " | ";
+    } else if (!blank) {
+      if (prevEnd !== null && x - prevEnd > 14 && out && !out.endsWith("\n") && !out.endsWith(" | ")) out += " | ";
+      out += it.str;
+    } else if (out && !out.endsWith(" ") && !out.endsWith("\n")) out += " ";
+    prevEnd = blank ? prevEnd : x + (it.width || 0);
+    if (it.hasEOL) {
+      out += "\n";
+      prevEnd = null;
+    }
+  }
+  return out
+    .split("\n")
+    .map((l) => l.replace(/[ \t]+/g, " ").replace(/^\s*\|\s*|\s*\|\s*$/g, "").trim())
+    .join("\n")
+    .trim();
+}
+
+let ocrWorker = null;
+async function getOcrWorker() {
+  if (!ocrWorker) {
+    const { createWorker } = await import("tesseract.js");
+    ocrWorker = await createWorker("eng");
+  }
+  return ocrWorker;
+}
+
+/** Render a PDF page to a canvas and read it with OCR (for pages whose text is stored as pictures). */
+async function ocrPage(page) {
+  const viewport = page.getViewport({ scale: 2 });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(canvas);
+  return (data?.text || "")
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
 /**
  * Extract an approved-source document (policy, spec sheet, claims policy) as plain text
  * with "[Page n]" markers so the backend can cite page numbers.
+ * Pages that are mostly pictures of text (common when Word exports tables or styled boxes)
+ * are read with OCR in the browser.
  */
-export async function extractPolicySource(file) {
+export async function extractPolicySource(file, onProgress) {
   const name = file.name;
   if (name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf") {
     const pdfjs = await loadPdfJs();
     const doc = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false, verbosity: 0 }).promise;
     const pages = [];
+    const ocrPages = [];
+    const ocrFailed = [];
     for (let p = 1; p <= doc.numPages; p++) {
-      const content = await (await doc.getPage(p)).getTextContent();
-      const text = content.items.map((it) => ("str" in it ? it.str + (it.hasEOL ? "\n" : "") : "")).join("");
-      pages.push(`[Page ${p}]\n${text.replace(/[ \t]+/g, " ").trim()}`);
+      const page = await doc.getPage(p);
+      let text = itemsToText((await page.getTextContent()).items);
+      let images = 0;
+      try {
+        const ops = await page.getOperatorList();
+        images = ops.fnArray.filter((fn) => fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintInlineImageXObject).length;
+      } catch {
+        /* optional */
+      }
+      // Body text without the running header/footer ("Page 2 of 3").
+      const body = text.split("\n").filter((l) => !/page \d+ of \d+/i.test(l)).join(" ");
+      if (images > 0 && body.length < 600) {
+        onProgress?.({ page: p, total: doc.numPages, phase: "ocr" });
+        try {
+          const ocr = await ocrPage(page);
+          if (ocr.length > body.length) {
+            text = ocr;
+            ocrPages.push(p);
+          }
+        } catch (e) {
+          console.warn("OCR failed for page", p, e);
+          ocrFailed.push(p);
+        }
+      }
+      onProgress?.({ page: p, total: doc.numPages, phase: "text" });
+      pages.push(`[Page ${p}]\n${text}`);
+    }
+    if (ocrWorker) {
+      await ocrWorker.terminate().catch(() => {});
+      ocrWorker = null;
     }
     const text = pages.join("\n\n");
-    return { name, text, pages: doc.numPages, chars: text.length };
+    return { name, text, pages: doc.numPages, chars: text.length, ocrPages, ocrFailed };
   }
   if (/\.(txt|md|tex)$/i.test(name)) {
     const text = await file.text();
     return { name, text, pages: 1, chars: text.length };
   }
   throw new Error("Upload a .pdf, .txt or .md policy document.");
+}
+
+export function ocrNote(doc) {
+  const parts = [];
+  if (doc?.ocrPages?.length) parts.push(`page${doc.ocrPages.length > 1 ? "s" : ""} ${doc.ocrPages.join(", ")} read with OCR`);
+  if (doc?.ocrFailed?.length) parts.push(`page${doc.ocrFailed.length > 1 ? "s" : ""} ${doc.ocrFailed.join(", ")} are images we couldn't read`);
+  return parts.join(" · ");
 }

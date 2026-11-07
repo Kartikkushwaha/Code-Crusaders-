@@ -55,6 +55,19 @@ export const DEFAULT_POLICY = {
   ],
 };
 
+// Used when the user supplies their own policy: only universal safety checks stay on
+// (personal data, absolute guarantees, unsourced numbers, hype/tone). Everything else
+// comes from the user's policy, so demo facts and terms never leak into their audit.
+export const CORE_POLICY = {
+  id: "user-policy",
+  name: "Your policy",
+  tone: null,
+  maxDeliveryDays: null,
+  bannedTerms: [],
+  approvedFacts: [],
+  approvedStatements: [],
+};
+
 // Words and phrases the tone auditor treats as hype / casual language.
 export const HYPE_WORDS = [
   "revolutionary", "game-changing", "game changer", "mind-blowing", "unbelievable", "insane",

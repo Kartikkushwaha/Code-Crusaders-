@@ -2,7 +2,7 @@
 
 Evidence-based brand compliance and governance dashboard for **CodeNexus India 2026 (Round 2: The Build)**, Team Code Crusaders.
 
-The live rule engine runs in the browser, so flags appear instantly as you type and the app still works if the backend is offline. **Run AI audit** adds a Gemini audit from the FastAPI backend, based on your approved sources.
+The live rule engine runs in the browser, so flags appear instantly as you type and the app still works if the backend is offline. **Run AI audit** adds an LLM audit (Groq, with Gemini as fallback) from the FastAPI backend, judged against your policy.
 
 ## Quick start
 
@@ -23,7 +23,8 @@ Requires Node.js 20.19+ (Vite 7).
 | Build | Vite 7, `@vitejs/plugin-react` |
 | UI | React 19, Tailwind CSS 4 (`@tailwindcss/vite`) |
 | Icons | `lucide-react` |
-| PDF text extraction | `pdfjs-dist` (loaded on demand, text layer only) |
+| PDF text extraction | `pdfjs-dist` (loaded on demand); tables keep their columns (` | `) |
+| OCR | `tesseract.js`, only for policy pages whose text is stored as pictures (loaded on demand) |
 | PDF export | Built-in, dependency-free writer (`src/lib/pdfExport.js`) |
 
 ## Workflow
@@ -61,7 +62,7 @@ src/
     TopBar.jsx                top bar with drawer toggle, risk pill, publish
     RichTextEditor.jsx        Word-style ribbon + contentEditable page
     AnalyticsPanel.jsx        live flags, filters, tabs
-    AiAuditCard.jsx           Gemini deep-audit control + provenance
+    AiAuditCard.jsx           AI deep-audit control, provenance, out-of-date notice
     SuggestionsQueue.jsx      accept / edit / override queue
     ToneAuditor.jsx           persona & tone score with fallback notice
     RiskBanner.jsx            HIGH / MEDIUM / LOW banner
@@ -69,8 +70,10 @@ src/
     HumanVerification.jsx     mandatory sign-off checklist
     StartScreen.jsx           content + policy upload, common-mistakes guide
     PolicyBar.jsx             shows/changes the content and policy being checked
+    FindingDetails.jsx        Problem → Policy says (line link) → Recommendation
+    PolicyViewer.jsx          numbered policy viewer that jumps to a cited line
     TopIssues.jsx             grouped 'fix these first' warnings
-    AuditTrail.jsx            publications + who/what/when activity log
+    AuditTrail.jsx            History: Neon audits + publications (table on desktop, cards on phones)
     Stepper.jsx, ui.jsx       shared UI
 scripts/package-zip.mjs       dependency-free archiver for frontend.zip
 ```
@@ -88,6 +91,47 @@ The start screen takes **your content** and **your policy** together. You don't 
 - **Without a policy**, the built-in rules still check personal data, absolute promises, unsourced numbers, hype and tone.
 - **The policy can also be written or pasted** instead of uploaded, on the start screen or from the **Against** bar in the workspace.
 - **To change the policy later**, use the **Against** bar in the workspace.
+- **The policy is kept between checks**, and in the browser across reloads. When you start a new check you choose **Use the current policy** or **Upload a new policy**.
+- **Your policy is the knowledge base.** When you supply one, the AI judges the content only against it, plus universal safety rules (personal data, absolute guarantees, unsourced numbers, tone). The default PUBLIVRA guidelines are used only when no policy is given.
+
+## AI results stay current
+
+The AI only reports problems found in the text it was sent. Findings that can't be located in the document are dropped. As soon as you edit, the old AI summary and recommendations are hidden, and AI flags on sentences you changed are removed. Re-run the AI audit to check the new version.
+
+## Explanations with policy citations
+
+Every flag is explained in three parts:
+- **Problem:** what's wrong and why.
+- **Policy says:** the exact line of your policy, with a `p.2 · line 14 ↗` link. The link opens the policy viewer and highlights that line.
+- **Recommendation:** what to do about it.
+
+The fix card also shows the **Solution** as a one-click rewrite.
+
+Where the citations come from:
+- **Live rule flags** taken from your policy carry their source line from the moment the policy is read.
+- **AI findings** cite the numbered policy line they rely on. The backend checks each quote against the real policy text, so a citation is only marked as matched when the quote is really there.
+- **Same issue found by both:** the live rule flag keeps its instant fix and gains the AI's citation and recommendation.
+
+**View** in the Against bar opens the whole policy, numbered line by line. Line numbers are computed the same way in `src/lib/policyLines.js` and `backend/policy_index.py`.
+
+## Policies with tables or image pages
+
+- **Tables:** Word tables such as `Restricted Term | Approved Alternative | Reason` are read row by row. Each row becomes a live rule, and plurals ("clients", "deals") are matched too.
+- **Image pages:** some Word exports store styled boxes and tables as **pictures of text**. Those pages are rendered and read with OCR in the browser. The policy card says which pages were read this way.
+- **OCR download:** the language data is downloaded the first time OCR runs, so it needs internet once.
+- **If OCR can't run**, the app tells you which pages to paste in instead.
+
+## Capital letters
+
+Capitals used to highlight a word ("NEW employers") are treated as normal emphasis. Only a sentence written mostly in capitals is flagged as shouting. Single all-caps words are flagged only if your policy explicitly says to avoid capitals or all caps.
+
+## History
+
+The **History** page loads your saved records from Neon:
+- **AI audits** (`document_compliance`): audit #, document, date, result, risk, tone, model, source and summary.
+- **Publications & sign-offs** (`publications`): record #, document, PDF, date, risk, score, release type, linked audit, sign-off status, approver and sign-off date.
+
+It also shows totals, a search box, publications still waiting for sign-off, and this session's activity log. Tables become cards on phones.
 
 ## Top issues
 
@@ -99,7 +143,7 @@ The dashboard is linked to the FastAPI backend in `../backend`.
 
 - `src/lib/api.js` reads `VITE_API_URL`. Locally that comes from `.env.development` (`http://localhost:8000`). In production, set it in Vercel's Environment Variables or in `.env.production`.
 - The top bar shows the backend's status (online, waking, offline). Render's free tier sleeps, so the first request can take about 50 seconds.
-- **Run AI audit**, in the analytics panel, sends the document, the built-in rules and your uploaded policy to `POST /api/audit`. Gemini's findings appear next to the live rule flags with an "AI" tag and can be accepted, edited or overridden in the same way.
+- **Run AI audit**, in the analytics panel, sends the document, the built-in rules and your uploaded policy to `POST /api/audit`. The AI's findings appear next to the live rule flags with an "AI" tag and can be accepted, edited or overridden in the same way.
 - Publishing calls `POST /api/publications`, and the human sign-off calls `POST /api/publications/{id}/verify`. Both are stored in Neon.
 - If the backend can't be reached, the app still works on the in-browser rule engine.
 
@@ -109,6 +153,6 @@ Use `frontend` as the root directory. Vite is detected automatically (`vercel.js
 
 ## AI and external-service disclosure
 
-- The live flags come from an in-browser rule engine. The optional deep audit calls the PUBLIVRA backend, which uses Google Gemini for the audit and for embeddings, and Neon to store records.
+- The live flags come from an in-browser rule engine. The optional deep audit calls the PUBLIVRA backend, which uses Groq (with Google Gemini as a fallback) for the audit, Gemini for embeddings, and Neon to store records.
 - Fonts load from Google Fonts. If they can't load, the app falls back to system fonts.
 - Parts of this frontend were written with AI assistance (Claude), as the event rules require us to disclose.

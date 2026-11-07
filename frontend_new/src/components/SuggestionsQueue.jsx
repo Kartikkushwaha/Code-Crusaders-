@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Check, CheckCheck, Crosshair, PenLine, ShieldOff, Sparkles, X } from "lucide-react";
 import { VerdictBadge, SeverityTag, Button } from "./ui.jsx";
+import FindingDetails from "./FindingDetails.jsx";
 
-export default function SuggestionsQueue({ queue, onAccept, onAcceptAll, onDismiss, onManualEdit, onLocate }) {
+export default function SuggestionsQueue({ queue, onAccept, onAcceptAll, onDismiss, onManualEdit, onLocate, onOpenRef }) {
   const fixable = queue.filter((f) => f.suggestion);
   if (!queue.length) {
     return (
@@ -28,14 +29,14 @@ export default function SuggestionsQueue({ queue, onAccept, onAcceptAll, onDismi
       </div>
       <ul className="space-y-2.5">
         {queue.map((f) => (
-          <SuggestionCard key={f.id} f={f} onAccept={onAccept} onDismiss={onDismiss} onManualEdit={onManualEdit} onLocate={onLocate} />
+          <SuggestionCard key={f.id} f={f} onAccept={onAccept} onDismiss={onDismiss} onManualEdit={onManualEdit} onLocate={onLocate} onOpenRef={onOpenRef} />
         ))}
       </ul>
     </div>
   );
 }
 
-function SuggestionCard({ f, onAccept, onDismiss, onManualEdit, onLocate }) {
+function SuggestionCard({ f, onAccept, onDismiss, onManualEdit, onLocate, onOpenRef }) {
   const [mode, setMode] = useState(null); // null | 'edit' | 'dismiss'
   const [draft, setDraft] = useState(f.suggestion?.preview ?? f.sentence);
   const [reason, setReason] = useState("");
@@ -55,10 +56,11 @@ function SuggestionCard({ f, onAccept, onDismiss, onManualEdit, onLocate }) {
         </button>
       </div>
 
-      <p className="mt-2 text-[11px] text-slate-400">{f.explanation}</p>
+      <FindingDetails f={f} onOpenRef={onOpenRef} />
 
       {f.suggestion ? (
         <div className="mt-2 rounded-lg bg-slate-900 p-2.5 text-xs leading-relaxed">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-400">Solution</div>
           {i >= 0 ? (
             <p className="text-slate-300">
               {f.sentence.slice(0, i)}

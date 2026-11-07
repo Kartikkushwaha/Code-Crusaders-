@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Activity, BrainCircuit, Crosshair, Gauge, ListChecks, MicVocal, X } from "lucide-react";
 import { groupOf, ISSUE_GROUPS } from "../lib/insights.js";
 import AiAuditCard from "./AiAuditCard.jsx";
+import FindingDetails from "./FindingDetails.jsx";
 import { VERDICT_STYLE, VerdictBadge, SeverityTag } from "./ui.jsx";
 import SuggestionsQueue from "./SuggestionsQueue.jsx";
 import ToneAuditor from "./ToneAuditor.jsx";
 
 const FILTERS = ["ALL", "CONTRADICTED", "UNVERIFIED", "VERIFIED"];
 
-export default function AnalyticsPanel({ analysis, risk, dismissed, scanning, onLocate, onAccept, onAcceptAll, onDismiss, onRestore, onManualEdit, policyName, ai, aiStale, engine, apiBase, onRunAi, onRetryEngine, policyDoc, focus }) {
+export default function AnalyticsPanel({ analysis, risk, dismissed, scanning, onLocate, onAccept, onAcceptAll, onDismiss, onRestore, onManualEdit, policyName, ai, aiStale, engine, apiBase, onRunAi, onRetryEngine, policyDoc, focus, onOpenRef }) {
   const [tab, setTab] = useState("suggestions");
   const [filter, setFilter] = useState("ALL");
   const [group, setGroup] = useState(null);
@@ -117,7 +118,7 @@ export default function AnalyticsPanel({ analysis, risk, dismissed, scanning, on
             )}
             <ul className="space-y-2">
               {sorted.map((f) => (
-                <FindingCard key={f.id} f={f} dismissedReason={dismissed[f.id]} onLocate={() => onLocate(f)} onRestore={() => onRestore(f)} />
+                <FindingCard key={f.id} f={f} dismissedReason={dismissed[f.id]} onLocate={() => onLocate(f)} onRestore={() => onRestore(f)} onOpenRef={onOpenRef} />
               ))}
             </ul>
           </>
@@ -134,7 +135,7 @@ export default function AnalyticsPanel({ analysis, risk, dismissed, scanning, on
           </div>
         )}
         {analysis && tab === "suggestions" && (
-          <SuggestionsQueue queue={queue} onAccept={onAccept} onAcceptAll={onAcceptAll} onDismiss={onDismiss} onManualEdit={onManualEdit} onLocate={onLocate} />
+          <SuggestionsQueue queue={queue} onAccept={onAccept} onAcceptAll={onAcceptAll} onDismiss={onDismiss} onManualEdit={onManualEdit} onLocate={onLocate} onOpenRef={onOpenRef} />
         )}
 
         {analysis && tab === "tone" && <ToneAuditor tone={analysis.tone} />}
@@ -174,7 +175,7 @@ function Highlight({ sentence, match, verdict }) {
   );
 }
 
-function FindingCard({ f, dismissedReason, onLocate, onRestore }) {
+function FindingCard({ f, dismissedReason, onLocate, onRestore, onOpenRef }) {
   const s = VERDICT_STYLE[f.verdict];
   return (
     <li className={`fade-in rounded-xl border border-slate-800 border-l-4 bg-slate-950/50 p-3 ${s.bar} ${dismissedReason ? "opacity-50" : ""}`}>
@@ -192,11 +193,13 @@ function FindingCard({ f, dismissedReason, onLocate, onRestore }) {
       <p className="mt-2 text-xs leading-relaxed text-slate-300">
         “<Highlight sentence={f.sentence} match={f.match} verdict={f.verdict} />”
       </p>
-      <p className={`mt-1.5 text-[11px] leading-relaxed ${s.text}`}>{f.explanation}</p>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[10px] text-slate-500">
-        <span className="font-mono">{f.clause}</span>
-        <span>· Source: {f.source}</span>
-      </div>
+      <FindingDetails f={f} onOpenRef={onOpenRef} />
+      {f.suggestion && f.verdict !== "VERIFIED" && (
+        <p className="mt-1.5 break-words rounded-lg bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-200">
+          <b className="text-emerald-300">Suggested fix: </b>
+          {f.suggestion.preview}
+        </p>
+      )}
       {dismissedReason && (
         <div className="mt-2 flex items-center justify-between rounded-md bg-sky-500/10 px-2 py-1 text-[10px] text-sky-300">
           <span>Overridden: {dismissedReason}</span>

@@ -1,11 +1,11 @@
 import { useMemo, useRef, useState } from "react";
-import { FileText, LoaderCircle, PenLine, RefreshCw, ScrollText, ShieldCheck, Trash2, Upload } from "lucide-react";
-import { extractPolicySource } from "../lib/fileParser.js";
+import { BookOpenText, FileText, LoaderCircle, PenLine, RefreshCw, ScrollText, ShieldCheck, Trash2, Upload } from "lucide-react";
+import { extractPolicySource, ocrNote } from "../lib/fileParser.js";
 import { derivePolicy } from "../lib/insights.js";
 import { Button, Modal } from "./ui.jsx";
 
 /** Strip above the editor: which content and which policy are being checked. Policy can be swapped here. */
-export default function PolicyBar({ source, policyDoc, detected, onPolicy, onRemovePolicy, onReplaceContent, toast }) {
+export default function PolicyBar({ source, policyDoc, detected, onPolicy, onRemovePolicy, onReplaceContent, onViewPolicy, toast }) {
   const ref = useRef(null);
   const [busy, setBusy] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
@@ -26,8 +26,9 @@ export default function PolicyBar({ source, policyDoc, detected, onPolicy, onRem
     setBusy(true);
     try {
       const doc = await extractPolicySource(file);
-      if (!doc.text.trim()) throw new Error("No readable text found in the policy file.");
+      if (!doc.text.replace(/\[Page \d+\]/g, "").trim()) throw new Error("No readable text found in the policy file.");
       onPolicy(doc);
+      if (doc.ocrFailed?.length) toast(`Pages ${doc.ocrFailed.join(", ")} are pictures of text and OCR couldn't run. Paste those rules instead.`, "danger");
     } catch (e) {
       toast(e.message, "danger");
     } finally {
@@ -36,10 +37,10 @@ export default function PolicyBar({ source, policyDoc, detected, onPolicy, onRem
   };
 
   return (
-    <div className="grid gap-2 md:grid-cols-2">
-      <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2.5">
+    <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2.5">
         <FileText className="h-5 w-5 shrink-0 text-blue-400" />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[9rem] flex-1">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Checking</div>
           <div className="truncate text-sm font-semibold text-slate-100">{source?.name || "Untitled document"}</div>
         </div>
@@ -50,15 +51,24 @@ export default function PolicyBar({ source, policyDoc, detected, onPolicy, onRem
         )}
       </div>
 
-      <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2.5">
         {policyDoc ? <ScrollText className="h-5 w-5 shrink-0 text-violet-400" /> : <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-400" />}
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[9rem] flex-1">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Against</div>
           <div className="truncate text-sm font-semibold text-slate-100">{policyDoc ? policyDoc.name : "PUBLIVRA built-in rules"}</div>
+          {policyDoc && ocrNote(policyDoc) && <div className="truncate text-[11px] text-sky-300">{ocrNote(policyDoc)}</div>}
           {policyDoc && detected.length > 0 && (
             <div className="truncate text-[11px] text-violet-300">{detected.map((d) => d.label).join(" · ")}</div>
           )}
         </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+        <button
+          onClick={onViewPolicy}
+          className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-500"
+          title="Read the policy line by line"
+        >
+          <BookOpenText className="h-3.5 w-3.5" /> View
+        </button>
         <button
           onClick={openPaste}
           className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-500"
@@ -80,6 +90,7 @@ export default function PolicyBar({ source, policyDoc, detected, onPolicy, onRem
             <Trash2 className="h-4 w-4" />
           </button>
         )}
+        </div>
         <input
           ref={ref}
           type="file"

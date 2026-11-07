@@ -3,7 +3,7 @@ import {
   ArrowRight, BookOpenCheck, CheckCheck, CloudUpload, FileText, ImageOff, Lightbulb, LoaderCircle, PenLine,
   ScrollText, ShieldCheck, Sparkles, SquarePen, X,
 } from "lucide-react";
-import { parseUpload, extractPolicySource } from "../lib/fileParser.js";
+import { parseUpload, extractPolicySource, ocrNote } from "../lib/fileParser.js";
 import { derivePolicy, COMMON_MISTAKES, ISSUE_GROUPS } from "../lib/insights.js";
 import { BLANK_HTML, SAMPLE_HTML } from "../data/sampleContent.js";
 import { ISSUE_ICONS } from "./issueIcons.js";
@@ -82,12 +82,16 @@ function FileChip({ icon: Icon, name, meta, onRemove, onEdit, tone = "blue" }) {
   );
 }
 
-export default function StartScreen({ onStart, toast }) {
+export default function StartScreen({ onStart, toast, currentPolicy }) {
   const [content, setContent] = useState(null); // { html, source, label, meta }
   const [contentBusy, setContentBusy] = useState(null);
   const [policy, setPolicy] = useState(null); // { doc, detected }
   const [policyBusy, setPolicyBusy] = useState(false);
   const [pasting, setPasting] = useState(false);
+  // When a policy is already loaded from an earlier check, the user picks: keep it, or bring a new one.
+  const [choice, setChoice] = useState(currentPolicy ? "current" : "new");
+  const usingCurrent = !!currentPolicy && choice === "current";
+  const currentRules = useMemo(() => (currentPolicy ? derivePolicy(currentPolicy.text).detected : []), [currentPolicy]);
   const [pasteText, setPasteText] = useState("");
   const pasteRules = useMemo(() => derivePolicy(pasteText).detected, [pasteText]);
 
@@ -119,9 +123,12 @@ export default function StartScreen({ onStart, toast }) {
   const pickPolicy = async (file) => {
     setPolicyBusy(true);
     try {
-      const doc = await extractPolicySource(file);
-      if (!doc.text.trim()) throw new Error("No readable text found in the policy file.");
+      const doc = await extractPolicySource(file, (p) => setPolicyBusy(p));
+      if (!doc.text.replace(/\[Page \d+\]/g, "").trim()) throw new Error("No readable text found in the policy file.");
       setPolicy({ doc, detected: derivePolicy(doc.text).detected });
+      if (doc.ocrFailed?.length)
+        toast(`Pages ${doc.ocrFailed.join(", ")} of ${file.name} are pictures of text and OCR couldn't run (it needs internet the first time). Paste those rules instead.`, "danger");
+      else if (doc.ocrPages?.length) toast(`Pages ${doc.ocrPages.join(", ")} were images of text - read them with OCR. Check the policy with "View" if anything looks off.`, "success");
     } catch (e) {
       toast(e.message, "danger");
     } finally {
@@ -132,10 +139,14 @@ export default function StartScreen({ onStart, toast }) {
   const applySamplePolicy = () => setPolicy({ doc: { ...SAMPLE_POLICY, chars: SAMPLE_POLICY.text.length }, detected: derivePolicy(SAMPLE_POLICY.text).detected });
 
   // A policy typed in the box counts even if "Use this policy" wasn't clicked.
-  const typedPolicy = pasting && pasteText.trim().length >= 10;
+  const typedPolicy = !usingCurrent && pasting && pasteText.trim().length >= 10;
   const start = (override) => {
     const text = pasteText.trim();
-    const doc = typedPolicy ? { name: "Pasted policy", text, pages: 1, chars: text.length, pasted: true } : policy?.doc || null;
+    const doc = usingCurrent
+      ? currentPolicy
+      : typedPolicy
+        ? { name: "Pasted policy", text, pages: 1, chars: text.length, pasted: true }
+        : policy?.doc || null;
     onStart({ ...(override || content), policyDoc: doc });
   };
 
@@ -195,7 +206,7 @@ export default function StartScreen({ onStart, toast }) {
             </button>
             <button
               onClick={() => {
-                if (!policy) applySamplePolicy();
+                if (!policy && !usingCurrent) applySamplePolicy();
                 setContent({ html: SAMPLE_HTML, source: { type: "sample", name: "Sample proposal" }, label: "Sample service proposal", meta: "Demo content with common mistakes" });
               }}
               className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 px-3 py-2.5 text-sm font-semibold text-slate-200 hover:border-slate-500"
@@ -220,111 +231,162 @@ export default function StartScreen({ onStart, toast }) {
             </div>
           </div>
 
-          {policy ? (
-            <>
+          {currentPolicy && (
+            <div className="mb-4 grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Which policy to use">
+              {[
+                { id: "current", title: "Use the current policy", sub: currentPolicy.name },
+                { id: "new", title: "Upload a new policy", sub: "File, paste or sample" },
+              ].map((o) => (
+                <button
+                  key={o.id}
+                  role="radio"
+                  aria-checked={choice === o.id}
+                  onClick={() => setChoice(o.id)}
+                  className={`flex min-w-0 items-start gap-2.5 rounded-xl border p-3 text-left transition-colors ${
+                    choice === o.id ? "border-violet-400 bg-violet-500/15" : "border-slate-700 bg-slate-950/40 hover:border-slate-500"
+                  }`}
+                >
+                  <span className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full border-2 ${choice === o.id ? "border-violet-400" : "border-slate-500"}`}>
+                    {choice === o.id && <span className="h-2 w-2 rounded-full bg-violet-400" />}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold text-slate-100">{o.title}</span>
+                    <span className="block truncate text-[11px] text-slate-400">{o.sub}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {usingCurrent ? (
+            <div className="fade-in">
               <FileChip
                 icon={ScrollText}
                 tone="violet"
-                name={policy.doc.name}
-                meta={`${policy.doc.pasted ? `${policy.doc.chars.toLocaleString("en-IN")} characters` : `${policy.doc.pages} page${policy.doc.pages === 1 ? "" : "s"}`} · used by the AI audit${policy.detected.length ? ` · ${policy.detected.length} rule(s) applied live` : ""}`}
-                onRemove={() => setPolicy(null)}
-                onEdit={
-                  policy.doc.pasted || policy.doc.name === SAMPLE_POLICY.name
-                    ? () => {
-                        setPasteText(policy.doc.text);
-                        setPolicy(null);
-                        setPasting(true);
-                      }
-                    : undefined
-                }
+                name={currentPolicy.name}
+                meta={`Kept from your last check · ${currentPolicy.chars?.toLocaleString("en-IN") ?? currentPolicy.text.length} characters`}
+                onRemove={() => setChoice("new")}
               />
-              {policy.detected.length > 0 && (
-                <div className="mt-3">
-                  <div className="mb-1.5 text-[11px] font-semibold text-slate-400">Rules we picked up and will check as you type:</div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {policy.detected.map((d) => (
-                      <span key={d.label} className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[11px] text-violet-200">
-                        {d.label}
-                      </span>
-                    ))}
-                  </div>
+              {currentRules.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {currentRules.map((d) => (
+                    <span key={d.label} className="max-w-full truncate rounded-full bg-violet-500/15 px-2 py-0.5 text-[11px] text-violet-200">
+                      {d.label}
+                    </span>
+                  ))}
                 </div>
               )}
-            </>
-          ) : pasting ? (
-            <div className="fade-in">
-              <label htmlFor="policy-paste" className="mb-1.5 block text-[11px] font-semibold text-slate-400">
-                Write or paste your policy rules
-              </label>
-              <textarea
-                id="policy-paste"
-                autoFocus
-                rows={9}
-                value={pasteText}
-                onChange={(e) => setPasteText(e.target.value)}
-                placeholder={`For example:\nTone must be formal.\nUse "Enterprise client" instead of "Customer".\nDo not use "synergy" or "disruptive".\nDelivery timelines must not exceed 60 days.\nNever publish phone numbers or PAN.`}
-                className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-3 text-sm leading-relaxed text-slate-100 placeholder:text-slate-600 focus:border-violet-500 focus:outline-none"
-              />
-              <div className="mt-2 min-h-6">
-                {pasteRules.length > 0 ? (
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] text-slate-500">Picked up:</span>
-                    {pasteRules.map((d) => (
-                      <span key={d.label} className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[11px] text-violet-200">
-                        {d.label}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <span className="text-[11px] text-slate-500">Plain sentences are fine. The AI audit reads the whole text.</span>
-                )}
-              </div>
-              <div className="mt-3 flex gap-2">
-                <button
-                  onClick={savePasted}
-                  disabled={pasteText.trim().length < 10}
-                  className="flex-1 rounded-xl bg-violet-600 px-3 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Use this policy
-                </button>
-                <button onClick={() => setPasting(false)} className="rounded-xl border border-slate-700 px-4 py-2.5 text-sm font-semibold text-slate-300 hover:border-slate-500">
-                  Cancel
-                </button>
-              </div>
             </div>
           ) : (
             <>
-              <DropZone accept=".pdf,.txt,.md,application/pdf" onFile={pickPolicy} busy={policyBusy} tone="violet">
-                {policyBusy ? (
-                  <>
-                    <LoaderCircle className="h-9 w-9 animate-spin text-violet-400" />
-                    <span className="mt-2 text-sm font-semibold">Reading policy…</span>
-                  </>
-                ) : (
-                  <>
-                    <BookOpenCheck className="h-9 w-9 text-violet-400" />
-                    <span className="mt-2 text-sm font-semibold text-slate-200">Drop your policy here or click to browse</span>
-                    <span className="mt-0.5 text-xs text-slate-500">.pdf · .txt · .md</span>
-                  </>
+          {policy ? (
+              <>
+                <FileChip
+                  icon={ScrollText}
+                  tone="violet"
+                  name={policy.doc.name}
+                  meta={`${policy.doc.pasted ? `${policy.doc.chars.toLocaleString("en-IN")} characters` : `${policy.doc.pages} page${policy.doc.pages === 1 ? "" : "s"}`}${ocrNote(policy.doc) ? ` · ${ocrNote(policy.doc)}` : ""} · used by the AI audit${policy.detected.length ? ` · ${policy.detected.length} rule(s) applied live` : ""}`}
+                  onRemove={() => setPolicy(null)}
+                  onEdit={
+                    policy.doc.pasted || policy.doc.name === SAMPLE_POLICY.name
+                      ? () => {
+                          setPasteText(policy.doc.text);
+                          setPolicy(null);
+                          setPasting(true);
+                        }
+                      : undefined
+                  }
+                />
+                {policy.detected.length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1.5 text-[11px] font-semibold text-slate-400">Rules we picked up and will check as you type:</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {policy.detected.map((d) => (
+                        <span key={d.label} className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[11px] text-violet-200">
+                          {d.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 )}
-              </DropZone>
-              <div className="my-3 flex items-center gap-3 text-[11px] uppercase tracking-wider text-slate-600">
-                <span className="h-px flex-1 bg-slate-800" /> or <span className="h-px flex-1 bg-slate-800" />
+              </>
+            ) : pasting ? (
+              <div className="fade-in">
+                <label htmlFor="policy-paste" className="mb-1.5 block text-[11px] font-semibold text-slate-400">
+                  Write or paste your policy rules
+                </label>
+                <textarea
+                  id="policy-paste"
+                  autoFocus
+                  rows={9}
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                  placeholder={`For example:\nTone must be formal.\nUse "Enterprise client" instead of "Customer".\nDo not use "synergy" or "disruptive".\nDelivery timelines must not exceed 60 days.\nNever publish phone numbers or PAN.`}
+                  className="w-full resize-y rounded-xl border border-slate-700 bg-slate-950 p-3 text-sm leading-relaxed text-slate-100 placeholder:text-slate-600 focus:border-violet-500 focus:outline-none"
+                />
+                <div className="mt-2 min-h-6">
+                  {pasteRules.length > 0 ? (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] text-slate-500">Picked up:</span>
+                      {pasteRules.map((d) => (
+                        <span key={d.label} className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[11px] text-violet-200">
+                          {d.label}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-[11px] text-slate-500">Plain sentences are fine. The AI audit reads the whole text.</span>
+                  )}
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <button
+                    onClick={savePasted}
+                    disabled={pasteText.trim().length < 10}
+                    className="flex-1 rounded-xl bg-violet-600 px-3 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Use this policy
+                  </button>
+                  <button onClick={() => setPasting(false)} className="rounded-xl border border-slate-700 px-4 py-2.5 text-sm font-semibold text-slate-300 hover:border-slate-500">
+                    Cancel
+                  </button>
+                </div>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => setPasting(true)}
-                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 px-3 py-2.5 text-sm font-semibold text-slate-200 hover:border-slate-500"
-                >
-                  <PenLine className="h-4 w-4" /> Write or paste
-                </button>
-                <button
-                  onClick={applySamplePolicy}
-                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 px-3 py-2.5 text-sm font-semibold text-slate-200 hover:border-slate-500"
-                >
-                  <Lightbulb className="h-4 w-4" /> Use sample policy
-                </button>
-              </div>
+            ) : (
+              <>
+                <DropZone accept=".pdf,.txt,.md,application/pdf" onFile={pickPolicy} busy={policyBusy} tone="violet">
+                  {policyBusy ? (
+                    <>
+                      <LoaderCircle className="h-9 w-9 animate-spin text-violet-400" />
+                      <span className="mt-2 text-sm font-semibold">{policyBusy?.phase === "ocr" ? `Page ${policyBusy.page} of ${policyBusy.total} is an image - reading it with OCR…` : "Reading policy…"}</span>
+                    </>
+                  ) : (
+                    <>
+                      <BookOpenCheck className="h-9 w-9 text-violet-400" />
+                      <span className="mt-2 text-sm font-semibold text-slate-200">Drop your policy here or click to browse</span>
+                      <span className="mt-0.5 text-xs text-slate-500">.pdf · .txt · .md</span>
+                    </>
+                  )}
+                </DropZone>
+                <div className="my-3 flex items-center gap-3 text-[11px] uppercase tracking-wider text-slate-600">
+                  <span className="h-px flex-1 bg-slate-800" /> or <span className="h-px flex-1 bg-slate-800" />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setPasting(true)}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 px-3 py-2.5 text-sm font-semibold text-slate-200 hover:border-slate-500"
+                  >
+                    <PenLine className="h-4 w-4" /> Write or paste
+                  </button>
+                  <button
+                    onClick={applySamplePolicy}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 px-3 py-2.5 text-sm font-semibold text-slate-200 hover:border-slate-500"
+                  >
+                    <Lightbulb className="h-4 w-4" /> Use sample policy
+                  </button>
+                </div>
+              </>
+            )}
+
             </>
           )}
 
@@ -332,7 +394,7 @@ export default function StartScreen({ onStart, toast }) {
             <div className="flex items-start gap-2 rounded-xl bg-slate-800/50 p-3 text-[11px] leading-relaxed text-slate-400">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
               <span>
-                {policy
+                {policy || usingCurrent
                   ? "Your policy is combined with PUBLIVRA's built-in safety rules (personal data, guarantees, unsourced numbers)."
                   : "No policy? PUBLIVRA's built-in rules still check personal data, absolute promises, unsourced numbers, hype and tone."}
               </span>
@@ -351,7 +413,13 @@ export default function StartScreen({ onStart, toast }) {
           Check my content <ArrowRight className="h-5 w-5" />
         </button>
         <span className="text-xs text-slate-500">
-          {content ? (policy || typedPolicy ? "Ready: content + your policy" : "Ready: we'll use the built-in rules") : "Add your content to begin"}
+          {content
+            ? usingCurrent
+              ? `Ready: content + ${currentPolicy.name}`
+              : policy || typedPolicy
+                ? "Ready: content + your new policy"
+                : "Ready: we'll use the built-in rules"
+            : "Add your content to begin"}
         </span>
       </div>
 
