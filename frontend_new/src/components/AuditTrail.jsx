@@ -3,7 +3,23 @@ import { Bot, Database, FileCheck2, History, LoaderCircle, RefreshCw, Search, Us
 import { api } from "../lib/api.js";
 import { RISK_STYLE } from "./ui.jsx";
 
-const fmt = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—");
+const fmt = (iso) => {
+  if (!iso) return "—";
+
+  const value =
+    typeof iso === "string" && !/(Z|[+-]\d{2}:?\d{2})$/i.test(iso)
+      ? `${iso.replace(" ", "T")}Z`
+      : iso;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+
+  return date.toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+};
 
 function RiskPill({ level }) {
   if (!level) return <span className="text-slate-500">—</span>;
@@ -249,7 +265,7 @@ export default function AuditTrail({ publications, activity, onOpenVerification,
                   {a.actor === "AI" ? <Bot className="h-3.5 w-3.5" /> : <User className="h-3.5 w-3.5" />}
                 </span>
                 <span className="min-w-0 flex-1 break-words text-slate-300">{a.message}</span>
-                <span className="shrink-0 font-mono text-[10px] text-slate-500">{new Date(a.at).toLocaleTimeString("en-IN")}</span>
+                <span className="shrink-0 font-mono text-[10px] text-slate-500">{fmt(a.at).split(", ").at(-1)}</span>
               </li>
             ))}
           </ol>
