@@ -13,6 +13,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+import analytics
 import audit_service
 import config
 import database
@@ -20,7 +21,7 @@ import database
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("publivra.api")
 
-VERSION = "2.2.0"  # 2.2: user policy as knowledge base, numbered policy lines, cited findings
+VERSION = "2.3.0"  # 2.3: per-section chart data (Tone, Logo, Data & Privacy, Others) before/after publication
 
 
 @asynccontextmanager
@@ -59,6 +60,8 @@ class AuditRequest(BaseModel):
     policy_rules: str = ""
     policy_document: Optional[PolicyDocument] = None
     tone_profile: str = "Professional"
+    rule_findings: List[dict] = []  # the dashboard's local rule-check findings, stored for the charts
+    company: str = ""
 
 
 class PublicationRequest(BaseModel):
@@ -69,6 +72,10 @@ class PublicationRequest(BaseModel):
     risk_score: int = 0
     overridden: bool = False
     counts: dict = {}
+    # Final state after the creator's fixes. If omitted, the audit's stored findings are used.
+    findings: Optional[List[dict]] = None
+    tone_score: Optional[float] = None
+    company: str = ""
 
 
 class VerifyRequest(BaseModel):
@@ -130,7 +137,7 @@ def health():
             "embedding_model": config.EMBEDDING_MODEL if config.GOOGLE_API_KEY else None,
         },
         "database": database.status(),
-        "features": ["user-policy-knowledge", "policy-line-refs", "full-policy-review"],
+        "features": ["user-policy-knowledge", "policy-line-refs", "full-policy-review", "section-analytics"],
     }
 
 
@@ -146,6 +153,8 @@ def audit(req: AuditRequest):
         policy_rules=req.policy_rules,
         policy_document=req.policy_document.model_dump() if req.policy_document else None,
         tone_profile=req.tone_profile,
+        rule_findings=req.rule_findings,
+        company=req.company.strip(),
     )
 
 
@@ -211,6 +220,15 @@ def brand_audit(document_file: UploadFile = File(None), file: UploadFile = File(
 
 @app.post("/api/publications")
 def create_publication(req: PublicationRequest):
+    findings, tone_score, company = req.findings, req.tone_score, req.company.strip()
+    if findings is None or tone_score is None or not company:
+        report, audit_company = database.get_audit_report(req.audit_id)
+        report = report or {}
+        findings = findings if findings is not None else report.get("findings", [])
+        tone_score = tone_score if tone_score is not None else report.get("tone_score")
+        company = company or audit_company or ""
+    tone_score = None if tone_score is None else int(round(float(tone_score)))
+    sections = analytics.breakdown(findings, tone_score)
     pub_id, created_at = database.create_publication(
         audit_id=req.audit_id,
         title=req.title,
@@ -219,6 +237,9 @@ def create_publication(req: PublicationRequest):
         risk_score=req.risk_score,
         overridden=req.overridden,
         counts=req.counts,
+        company=company,
+        tone_score=tone_score,
+        sections=analytics.columns(sections),
     )
     if pub_id:
         database.log_event(
@@ -228,7 +249,7 @@ def create_publication(req: PublicationRequest):
             audit_id=req.audit_id,
             publication_id=pub_id,
         )
-    return {"id": pub_id, "created_at": created_at, "db_logged": pub_id is not None}
+    return {"id": pub_id, "created_at": created_at, "db_logged": pub_id is not None, "sections": sections}
 
 
 @app.post("/api/publications/{pub_id}/verify")
@@ -249,6 +270,24 @@ def list_publications(limit: int = 20):
 @app.get("/api/audits")
 def list_audits(limit: int = 20):
     return {"items": database.list_audits(max(1, min(limit, 100)))}
+
+
+@app.get("/api/analytics")
+def get_analytics(stage: str = "before", company: str = "", days: int = 0):
+    """Bar-chart data. stage=before -> AI audits (document_compliance); stage=after -> publications.
+
+    x-axis: Tone, Logo, Data & Privacy, Others. y-axis: average risk score (0-100) with its level.
+    Each bar also carries the level mix and the most repeated issues for the hover popup.
+    """
+    stage = "after" if stage == "after" else "before"
+    rows = database.analytics_rows(stage, company.strip() or None, days if days > 0 else None)
+    return {**analytics.chart(rows, stage), "company": company.strip() or None, "db": database.status()["state"]}
+
+
+@app.get("/api/analytics/compare")
+def compare_analytics(company: str = "", days: int = 0):
+    """Before vs after publication in one call, for a side-by-side (grouped) bar chart."""
+    return {"before": get_analytics("before", company, days), "after": get_analytics("after", company, days)}
 
 
 @app.post("/api/events")

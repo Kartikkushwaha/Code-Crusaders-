@@ -210,6 +210,35 @@ def test_risk_levels():
     assert audit_service.compute_risk([{"verdict": "CONTRADICTED", "severity": "high"}], 9)[0] == "HIGH"
 
 
+
+def test_section_breakdown():
+    import analytics
+    b = analytics.breakdown([
+        {"claim_text": "PAN ABCDE1234F", "category": "Privacy", "verdict": "CONTRADICTED", "severity": "high", "policy_quote": "No PAN"},
+        {"claim_text": "PAN ABCDE1234F", "category": "Privacy", "verdict": "CONTRADICTED", "severity": "high"},  # duplicate
+        {"claim_text": "SHOUT", "category": "Tone", "verdict": "CONTRADICTED", "severity": "low"},
+        {"claim_text": "old logo", "category": "Logo", "verdict": "CONTRADICTED", "severity": "medium"},
+        {"claim_text": "3x faster", "category": "Facts & claims", "verdict": "UNVERIFIED", "severity": "medium"},
+        {"claim_text": "50 MP", "category": "Facts & claims", "verdict": "VERIFIED", "severity": "none"},
+    ], tone_score=6)
+    assert (b["privacy"]["count"], b["privacy"]["level"], b["privacy"]["issues"][0]["rule"]) == (1, "HIGH", "No PAN")
+    assert b["tone"]["score"] == 5 + 2 * 5 and b["logo"]["count"] == 1 and b["other"]["count"] == 1
+    cols = analytics.columns(b)
+    assert set(cols) >= {"tone_score", "logo_level", "privacy_count", "other_issues"}
+
+
+def test_section_chart():
+    import analytics
+    rows = [analytics.columns(analytics.breakdown([{"claim_text": "x@y.com", "category": "Privacy", "verdict": "CONTRADICTED",
+                                                      "severity": "high", "explanation": "Email exposed"}], 8)) for _ in range(3)]
+    rows.append(analytics.columns(analytics.breakdown([], 8)))
+    c = analytics.chart(rows, "before")
+    priv = next(b for b in c["bars"] if b["key"] == "privacy")
+    assert [b["label"] for b in c["bars"]] == ["Tone", "Logo", "Data & Privacy", "Others"]
+    assert priv["avg_score"] == 22.5 and priv["documents_with_issues"] == 3 and priv["levels"]["HIGH"] == 3
+    assert priv["top_issues"][0] == {"issue": "Email exposed", "times": 3, "policy_line": "", "example": "x@y.com"}
+    assert analytics.chart([], "after")["bars"][0]["avg_score"] == 0
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_") and callable(v)]
     for t in tests:

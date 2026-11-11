@@ -2,6 +2,7 @@
 import hashlib
 import re
 
+import analytics
 import brand_engine
 import config
 import database
@@ -133,7 +134,8 @@ def build_context(sources, document_text: str):
     return context, info, index
 
 
-def audit_text(*, text, title="Untitled", source="editor", policy_rules="", policy_document=None, tone_profile="Professional", model_factory=None, log_to_db=True):
+def audit_text(*, text, title="Untitled", source="editor", policy_rules="", policy_document=None, tone_profile="Professional",
+               model_factory=None, log_to_db=True, rule_findings=None, company=""):
     text = (text or "")[: config.MAX_DOCUMENT_CHARS]
     tone_profile = tone_profile if tone_profile in TONE_PROFILES else "Professional"
 
@@ -172,6 +174,10 @@ def audit_text(*, text, title="Untitled", source="editor", policy_rules="", poli
         "risk_score": score,
         "counts": {v: sum(1 for f in findings if f["verdict"] == v) for v in ("VERIFIED", "UNVERIFIED", "CONTRADICTED")},
     }
+    # Improvement 2: chart sections (Tone, Logo, Data & Privacy, Others) for the "before publication" graph.
+    # The dashboard's own rule checks (PII, banned terms...) are included when it sends them.
+    sections = analytics.breakdown(findings + [f for f in (rule_findings or []) if isinstance(f, dict)], tone_score)
+    result["sections"] = sections
 
     audit_id, created_at = (None, None)
     if log_to_db:
@@ -188,6 +194,10 @@ def audit_text(*, text, title="Untitled", source="editor", policy_rules="", poli
             summary=report.summary,
             model=model_used,
             report=result,
+            risk_score=score,
+            company=company,
+            tone_score=tone_score,
+            sections=analytics.columns(sections),
         )
     result.update(audit_id=audit_id, created_at=created_at, db_logged=audit_id is not None)
     return result

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import psycopg2
 import psycopg2.extras
 
+import analytics
 import config
 
 log = logging.getLogger("publivra.db")
@@ -59,21 +60,57 @@ CREATE TABLE IF NOT EXISTS audit_events (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_publications_created ON publications (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_compliance_created ON document_compliance (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_created ON audit_events (created_at DESC);
 """
 
+
+def _section_columns_sql(table: str) -> str:
+    """Improvement 2: one score/level/count/issues column per chart section (Tone, Logo, Data & Privacy, Others)."""
+    out = [
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS risk_score INTEGER;",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS company TEXT;",
+        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS tone_profile_score INTEGER;",
+    ]
+    for k in analytics.SECTION_KEYS:
+        out += [
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {k}_score INTEGER;",
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {k}_level TEXT;",
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {k}_count INTEGER;",
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {k}_issues JSONB;",
+        ]
+    return "\n".join(out)
+
+
+SCHEMA_SQL += _section_columns_sql("document_compliance") + "\n" + _section_columns_sql("publications")
+
+SECTION_COLS = [f"{k}_{c}" for k in analytics.SECTION_KEYS for c in ("score", "level", "count", "issues")]
+
+
+def _section_values(cols: dict):
+    vals = []
+    for name in SECTION_COLS:
+        v = (cols or {}).get(name)
+        vals.append(json.dumps(v or []) if name.endswith("_issues") else v)
+    return vals
+
+
 INSERT_AUDIT_SQL = """
 INSERT INTO document_compliance
-    (filename, extracted_text, is_compliant, status, violations, source, risk_level, tone, summary, model, report)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    (filename, extracted_text, is_compliant, status, violations, source, risk_level, tone, summary, model, report,
+     risk_score, company, tone_profile_score, """ + ", ".join(SECTION_COLS) + """)
+VALUES (""" + ", ".join(["%s"] * (14 + len(SECTION_COLS))) + """)
 RETURNING id, created_at;
 """
 
 INSERT_PUBLICATION_SQL = """
-INSERT INTO publications (audit_id, title, file_name, risk_level, risk_score, overridden, counts)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+INSERT INTO publications (audit_id, title, file_name, risk_level, risk_score, overridden, counts,
+    company, tone_profile_score, """ + ", ".join(SECTION_COLS) + """)
+VALUES (""" + ", ".join(["%s"] * (9 + len(SECTION_COLS))) + """)
 RETURNING id, created_at;
 """
+
+GET_AUDIT_REPORT_SQL = "SELECT report, company FROM document_compliance WHERE id = %s;"
 
 VERIFY_PUBLICATION_SQL = """
 UPDATE publications
@@ -149,6 +186,12 @@ def init_db() -> bool:
         with connection() as conn, conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
         _status.update(state="connected", error=None)
+        try:
+            n = backfill_sections()
+            if n:
+                log.info("Backfilled chart sections for %s rows.", n)
+        except Exception as exc:  # pragma: no cover - never block boot
+            log.warning("Section backfill skipped: %s", exc)
         log.info("Neon database ready.")
         return True
     except Exception as exc:  # pragma: no cover - network dependent
@@ -164,7 +207,8 @@ def _jsonable(row: dict) -> dict:
     return out
 
 
-def save_audit(*, filename, text, is_compliant, status_label, violations, source, risk_level, tone, summary, model, report):
+def save_audit(*, filename, text, is_compliant, status_label, violations, source, risk_level, tone, summary, model, report,
+               risk_score=None, company=None, tone_score=None, sections=None):
     """Returns (audit_id, created_at_iso) or (None, None) if the DB is unavailable."""
     if not is_configured():
         return None, None
@@ -184,6 +228,10 @@ def save_audit(*, filename, text, is_compliant, status_label, violations, source
                     summary[:4000],
                     model,
                     json.dumps(report)[:200000],
+                    risk_score,
+                    (company or None) and company[:120],
+                    tone_score,
+                    *_section_values(sections),
                 ),
             )
             row = cur.fetchone()
@@ -195,14 +243,15 @@ def save_audit(*, filename, text, is_compliant, status_label, violations, source
         return None, None
 
 
-def create_publication(*, audit_id, title, file_name, risk_level, risk_score, overridden, counts):
+def create_publication(*, audit_id, title, file_name, risk_level, risk_score, overridden, counts, company=None, tone_score=None, sections=None):
     if not is_configured():
         return None, None
     try:
         with connection() as conn, conn.cursor() as cur:
             cur.execute(
                 INSERT_PUBLICATION_SQL,
-                (audit_id, title[:300], file_name[:300], risk_level, risk_score, overridden, json.dumps(counts or {})),
+                (audit_id, title[:300], file_name[:300], risk_level, risk_score, overridden, json.dumps(counts or {}),
+                 (company or None) and company[:120], tone_score, *_section_values(sections)),
             )
             row = cur.fetchone()
         return row[0], row[1].isoformat()
@@ -260,3 +309,60 @@ def log_event(*, actor, action, detail=None, audit_id=None, publication_id=None)
     except Exception as exc:  # pragma: no cover
         log.warning("Event not logged: %s", exc)
         return None
+
+
+def get_audit_report(audit_id):
+    """The stored AI report of an audit (used when a publication arrives without its final findings)."""
+    if not is_configured() or not audit_id:
+        return None, None
+    try:
+        with connection() as conn, conn.cursor() as cur:
+            cur.execute(GET_AUDIT_REPORT_SQL, (audit_id,))
+            row = cur.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+    except Exception as exc:  # pragma: no cover
+        log.warning("Could not read audit %s: %s", audit_id, exc)
+        return None, None
+
+
+def analytics_rows(stage="before", company=None, days=None, limit=1000):
+    """Section columns for the bar chart. stage 'before' = document_compliance, 'after' = publications."""
+    if not is_configured():
+        return []
+    table = "publications" if stage == "after" else "document_compliance"
+    where, args = [f"{analytics.SECTION_KEYS[0]}_level IS NOT NULL"], []
+    if company:
+        where.append("company = %s")
+        args.append(company)
+    if days:
+        where.append("created_at >= NOW() - make_interval(days => %s)")
+        args.append(int(days))
+    sql = f"SELECT {', '.join(SECTION_COLS)}, created_at FROM {table} WHERE {' AND '.join(where)} ORDER BY created_at DESC LIMIT %s;"
+    try:
+        with connection() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (*args, limit))
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:  # pragma: no cover
+        log.warning("Could not read analytics rows: %s", exc)
+        return []
+
+
+def backfill_sections(limit=2000):
+    """Fill the section columns for rows saved before Improvement 2, from their stored report."""
+    sets = ", ".join(f"{c} = %s" for c in SECTION_COLS)
+    done = 0
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(f"SELECT id, report FROM document_compliance WHERE {analytics.SECTION_KEYS[0]}_level IS NULL AND report IS NOT NULL LIMIT %s;", (limit,))
+        for audit_id, report in cur.fetchall():
+            report = report or {}
+            cols = analytics.columns(analytics.breakdown(report.get("findings"), report.get("tone_score")))
+            cur.execute(f"UPDATE document_compliance SET {sets}, risk_score = COALESCE(risk_score, %s), tone_profile_score = COALESCE(tone_profile_score, %s) WHERE id = %s;",
+                        (*_section_values(cols), report.get("risk_score"), report.get("tone_score"), audit_id))
+            done += 1
+        # publications copy the breakdown of their audit (the best record we have for old rows)
+        src_cols = ", ".join(f"{c} = d.{c}" for c in SECTION_COLS)
+        cur.execute(f"""UPDATE publications p SET {src_cols}, tone_profile_score = COALESCE(p.tone_profile_score, d.tone_profile_score)
+                        FROM document_compliance d
+                        WHERE p.audit_id = d.id AND p.{analytics.SECTION_KEYS[0]}_level IS NULL AND d.{analytics.SECTION_KEYS[0]}_level IS NOT NULL;""")
+        done += cur.rowcount or 0
+    return done

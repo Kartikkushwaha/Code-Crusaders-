@@ -41,6 +41,16 @@ Alternatively, use `render.yaml` in the repo root (Blueprint deploy).
 | POST | `/api/publications/{id}/verify` | Record the human sign-off |
 | GET | `/api/publications`, `/api/audits` | History from Neon |
 | POST | `/api/events` | Audit-trail events (overrides, etc.) |
+| GET | `/api/analytics?stage=before\|after&company=&days=` | Bar-chart data: Tone, Logo, Data & Privacy, Others → average risk score, level, issue count, level mix and top repeated issues (hover) |
+| GET | `/api/analytics/compare` | Before and after publication in one call |
+
+**Chart sections (Improvement 2).** Every audit row (`document_compliance`, before publication) and every
+publication row (after the creator's fixes) stores, for each of `tone`, `logo`, `privacy`, `other`:
+`<section>_score` (0-100), `<section>_level` (HIGH/MEDIUM/LOW), `<section>_count` and `<section>_issues` (JSONB list:
+claim, verdict, severity, rule, policy line). Both tables also get `risk_score`, `company` and `tone_profile_score`.
+Columns are added automatically on boot and older rows are backfilled from their stored report.
+`/api/audit` accepts optional `rule_findings` and `company`; `/api/publications` accepts optional final `findings`,
+`tone_score` and `company` (if omitted, the audit's stored findings are used).
 
 ## How an audit works
 
