@@ -42,7 +42,24 @@ export const api = {
   logEvent: (payload) => request("/api/events", { method: "POST", body: payload }).catch(() => null),
   listAudits: (limit = 50) => request(`/api/audits?limit=${limit}`, { timeout: 75000 }),
   listPublications: (limit = 50) => request(`/api/publications?limit=${limit}`, { timeout: 75000 }),
+  // Improvement 2: bar-chart data, before (AI audits) and after (publications) in one call.
+  analytics: ({ company = "", days = 0 } = {}) =>
+    request(`/api/analytics/compare?company=${encodeURIComponent(company)}&days=${days}`, { timeout: 75000 }),
 };
+
+/** Shape a dashboard finding (rule engine or AI) the way the backend stores it for the charts. */
+export function toServerFinding(f) {
+  return {
+    claim_text: f.match || f.sentence || "",
+    category: f.category || "",
+    verdict: f.verdict,
+    severity: f.severity,
+    explanation: f.explanation || "",
+    source_reference: f.source || f.clause || "",
+    policy_quote: f.policyQuote || "",
+    policy_ref: f.policyRef || null,
+  };
+}
 
 /** Map a backend finding onto the shape the dashboard uses for rule findings. */
 export function toUiFinding(f) {

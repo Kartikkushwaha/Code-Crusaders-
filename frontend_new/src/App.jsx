@@ -10,6 +10,7 @@ import PolicyViewer from "./components/PolicyViewer.jsx";
 import { DEFAULT_GUIDELINES } from "./data/defaultGuidelines.js";
 import RichTextEditor from "./components/RichTextEditor.jsx";
 import AnalyticsPanel from "./components/AnalyticsPanel.jsx";
+import Insights from "./components/Insights.jsx";
 import RiskBanner from "./components/RiskBanner.jsx";
 import Stepper from "./components/Stepper.jsx";
 import { ReadyModal, HighRiskModal } from "./components/PublishModals.jsx";
@@ -19,7 +20,7 @@ import { Toasts } from "./components/ui.jsx";
 
 import { derivePolicy, groupFindings } from "./lib/insights.js";
 import { analyzeDocument, computeRisk, policyToText, tidy as tidySentence } from "./lib/policyEngine.js";
-import { api, API_BASE, toUiFinding } from "./lib/api.js";
+import { api, API_BASE, toServerFinding, toUiFinding } from "./lib/api.js";
 import { editorPlainText, locateInEditor, replaceInEditor } from "./lib/editorUtils.js";
 import { parseUpload } from "./lib/fileParser.js";
 import { buildPublicationPdf, domToBlocks, downloadBlob, slugify } from "./lib/pdfExport.js";
@@ -41,6 +42,22 @@ export default function App() {
   // navigation
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [view, setView] = useState("workspace");
+  // Company / brand name: tags every audit and publication so managers can filter the charts.
+  const [company, setCompanyState] = useState(() => {
+    try {
+      return localStorage.getItem("publivra.company") || "";
+    } catch {
+      return "";
+    }
+  });
+  const setCompany = useCallback((v) => {
+    setCompanyState(v);
+    try {
+      localStorage.setItem("publivra.company", v);
+    } catch {
+      /* storage blocked */
+    }
+  }, []);
 
   // document
   const editorRef = useRef(null);
@@ -194,6 +211,9 @@ export default function App() {
         policy_rules: policyToText(policy),
         policy_document: policyDoc ? { name: policyDoc.name, text: policyDoc.text } : null,
         tone_profile: policy.tone || "Professional",
+        // the dashboard's own rule checks, so the charts count PII / banned terms too
+        rule_findings: (analysis?.findings ?? []).filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
+        company: company.trim(),
       });
       setAi({ status: "done", result, error: null, textAtRun: snapshot, ranAt: Date.now() });
       if (engine.status !== "online") setEngine((e) => ({ ...e, status: "online" }));
@@ -208,7 +228,7 @@ export default function App() {
       log(`AI audit failed: ${e.message}`, "AI");
       toast(`AI audit failed: ${e.message}`, "danger");
     }
-  }, [text, title, source, policy, policyDoc, engine.status, log, toast]);
+  }, [text, title, source, policy, policyDoc, engine.status, log, toast, analysis, dismissed, company]);
 
   const lastLevel = useRef(null);
   useEffect(() => {
@@ -387,6 +407,10 @@ export default function App() {
         risk_score: risk.score,
         overridden,
         counts: risk.counts,
+        // final state after the creator's fixes -> the "after publication" chart
+        findings: merged.findings.filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
+        tone_score: merged.tone?.score != null ? Math.round(merged.tone.score) : null,
+        company: company.trim(),
       })
       .then((r) => {
         if (r?.id) {
@@ -555,6 +579,7 @@ export default function App() {
             onGoToWorkspace={() => setView("workspace")}
           />
         )}
+        {view === "insights" && <Insights company={company} onCompanyChange={setCompany} />}
         {view === "history" && (
           <AuditTrail
             publications={publications}

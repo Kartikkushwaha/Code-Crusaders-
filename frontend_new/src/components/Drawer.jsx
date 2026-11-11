@@ -1,9 +1,10 @@
 import { useEffect } from "react";
-import { ClipboardCheck, FilePenLine, History, LayoutDashboard, ShieldCheck, X } from "lucide-react";
+import { BarChart3, ClipboardCheck, FilePenLine, History, LayoutDashboard, ShieldCheck, X } from "lucide-react";
 
 const NAV = [
   { id: "workspace", label: "Check content", hint: "Upload content & policy, fix issues", icon: LayoutDashboard },
   { id: "verification", label: "Sign-off", hint: "Final human checklist", icon: ClipboardCheck },
+  { id: "insights", label: "Insights", hint: "Risk by section, before & after publishing", icon: BarChart3 },
   { id: "history", label: "History", hint: "Everything that happened, logged", icon: History },
 ];
 
