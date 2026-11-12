@@ -206,6 +206,18 @@ async function getOcrWorker() {
   return ocrWorker;
 }
 
+/** OCR any canvas (used by the visual audit for text inside images). */
+export async function ocrCanvas(canvas) {
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(canvas);
+  const text = (data?.text || "")
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+  return { text, confidence: Math.round(data?.confidence ?? 0) };
+}
+
 /** Render a PDF page to a canvas and read it with OCR (for pages whose text is stored as pictures). */
 async function ocrPage(page) {
   const viewport = page.getViewport({ scale: 2 });

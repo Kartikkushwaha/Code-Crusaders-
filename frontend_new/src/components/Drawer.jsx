@@ -1,14 +1,27 @@
 import { useEffect } from "react";
-import { BarChart3, ClipboardCheck, FilePenLine, History, LayoutDashboard, ShieldCheck, X } from "lucide-react";
+import { BarChart3, ClipboardCheck, FilePenLine, History, Inbox, LayoutDashboard, Scale, ShieldCheck, X } from "lucide-react";
+import { RoleSwitcher } from "./TopBar.jsx";
 
-const NAV = [
-  { id: "workspace", label: "Check content", hint: "Upload content & policy, fix issues", icon: LayoutDashboard },
-  { id: "verification", label: "Sign-off", hint: "Final human checklist", icon: ClipboardCheck },
-  { id: "insights", label: "Insights", hint: "Risk by section, before & after publishing", icon: BarChart3 },
-  { id: "history", label: "History", hint: "Everything that happened, logged", icon: History },
-];
+export const NAV = {
+  creator: [
+    { id: "workspace", label: "Check content", hint: "Upload content, images & policy, fix issues", icon: LayoutDashboard },
+    { id: "verification", label: "Sign-off", hint: "Final human checklist after approval", icon: ClipboardCheck },
+    { id: "insights", label: "Insights", hint: "Common graph of risk by violation type", icon: BarChart3 },
+    { id: "history", label: "History & sign-off", hint: "AI audits, approvals and sign-offs", icon: History },
+  ],
+  manager: [
+    { id: "approvals", label: "Approval requests", hint: "Content sent by creators", icon: Inbox },
+    { id: "insights", label: "Insights", hint: "Common graph + company graph", icon: BarChart3 },
+    { id: "history", label: "History & sign-off", hint: "AI audits, approvals and sign-offs", icon: History },
+  ],
+  legal: [
+    { id: "legal", label: "Legal review", hint: "Submissions forwarded by the manager", icon: Scale },
+    { id: "history", label: "History & sign-off", hint: "AI audits, approvals and sign-offs", icon: History },
+  ],
+};
+export const PANEL_TITLE = { creator: "Creator panel", manager: "Manager panel", legal: "Legal approver panel" };
 
-export default function Drawer({ open, onClose, view, onNavigate, badges, onNewDocument, policyName }) {
+export default function Drawer({ open, onClose, view, onNavigate, badges, onNewDocument, policyName, role, onRole, roleBadges }) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => e.key === "Escape" && onClose();
@@ -48,6 +61,12 @@ export default function Drawer({ open, onClose, view, onNavigate, badges, onNewD
         </div>
 
         <div className="px-3 pt-4">
+          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">Panel</div>
+          <RoleSwitcher role={role} onRole={onRole} badges={roleBadges} full />
+        </div>
+
+        {role === "creator" && (
+        <div className="px-3 pt-3">
           <button
             onClick={onNewDocument}
             className="flex w-full items-center gap-2 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 py-2.5 text-left text-sm font-semibold text-indigo-200 hover:bg-indigo-500/20"
@@ -56,9 +75,10 @@ export default function Drawer({ open, onClose, view, onNavigate, badges, onNewD
             New check
           </button>
         </div>
+        )}
 
         <nav className="flex-1 space-y-1 px-3 py-4">
-          {NAV.map((item) => {
+          {NAV[role].map((item) => {
             const Icon = item.icon;
             const active = view === item.id;
             return (

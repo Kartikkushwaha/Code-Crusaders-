@@ -284,7 +284,7 @@ const VERDICT_COLOR = { VERIFIED: "#047857", UNVERIFIED: "#b45309", CONTRADICTED
  * Build the final publication PDF.
  * @returns {Blob}
  */
-export function buildPublicationPdf({ title, blocks, risk, tone, findings, dismissed, policyName, overridden, publishedAt, sourceLabel, aiInfo }) {
+export function buildPublicationPdf({ title, blocks, risk, tone, findings, dismissed, policyName, overridden, publishedAt, sourceLabel, aiInfo, approvals }) {
   const wr = new Writer();
   const date = new Date(publishedAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 
@@ -304,7 +304,10 @@ export function buildPublicationPdf({ title, blocks, risk, tone, findings, dismi
       fill: medium ? "#fffbeb" : "#ecfdf5", stroke: medium ? "#d97706" : "#059669",
       titleColor: medium ? "#92400e" : "#065f46", bodyColor: medium ? "#78350f" : "#064e3b",
       title: `${risk.level} RISK - READY TO PUBLISH`,
-      lines: [`Audited against ${policyName} on ${date}. ${risk.counts.verified} verified, ${risk.counts.unverified} unverified, ${risk.counts.contradicted} contradicted.`],
+      lines: [
+        `Audited against ${policyName} on ${date}. ${risk.counts.verified} verified, ${risk.counts.unverified} unverified, ${risk.counts.contradicted} contradicted.`,
+        ...(approvals ? [approvals] : []),
+      ],
     });
   }
 

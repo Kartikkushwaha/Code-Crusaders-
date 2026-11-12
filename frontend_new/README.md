@@ -156,3 +156,29 @@ Use `frontend` as the root directory. Vite is detected automatically (`vercel.js
 - The live flags come from an in-browser rule engine. The optional deep audit calls the PUBLIVRA backend, which uses Groq (with Google Gemini as a fallback) for the audit, Gemini for embeddings, and Neon to store records.
 - Fonts load from Google Fonts. If they can't load, the app falls back to system fonts.
 - Parts of this frontend were written with AI assistance (Claude), as the event rules require us to disclose.
+
+## Round 3
+
+**Three panels, one switch.** Use the Creator / Manager / Legal switch in the top bar (or the menu).
+All three panels share the same approval data, saved in the browser (localStorage), so you can switch
+roles and follow one submission through the whole flow.
+
+- **Creator panel** - check text, PDFs and images. Publishing stays **locked** until the content is approved.
+  "Send to Manager" sends the content, the fixes applied, the visual audit and the AI score.
+  Rejections show the reason and the required improvements; approval shows "Ready to Publish" and unlocks
+  Publish & sign-off. Editing after approval locks publishing again until it is re-submitted.
+- **Manager panel** - approval requests with the full content, open issues, fixes, visual audit and history.
+  Approve as **Manager + Legal** (tick both boxes), **forward** to a separate legal approver, or **reject** with a reason.
+  Insights shows the **Common graph** and the manager-only **Company graph**.
+- **Legal approver panel** - submissions forwarded by the manager: accept (unlocks publishing) or reject with a reason.
+- **History & sign-off** - every submission's (1) AI audit and (2) approvals, publication and sign-off, with a full timeline.
+
+**Images & graphics audit (Creator panel).** Add ads, posters or social graphics:
+- *Logo check* - finds the reference logo from the brand kit; flags missing, altered, stretched or recoloured logos.
+- *Brand colours* - main colours must match the policy colours (hex codes are read from the policy automatically).
+- *Text inside the image* (OCR) - brand name and motto must be 100% identical to the policy; the rest of the ad text
+  goes through the rule checks and the AI deep audit (Contradicted / Unverified / Verified).
+Image findings count towards the risk score, go to the manager, and feed the **Logo** bars in Insights.
+
+> Note: approvals are stored in the browser for this demo, so all roles must use the same browser.
+> A shared database table and logins are needed for reviewers on different devices.

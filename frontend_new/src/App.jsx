@@ -17,6 +17,11 @@ import { ReadyModal, HighRiskModal } from "./components/PublishModals.jsx";
 import HumanVerification from "./components/HumanVerification.jsx";
 import AuditTrail from "./components/AuditTrail.jsx";
 import { Toasts } from "./components/ui.jsx";
+import VisualAudit from "./components/VisualAudit.jsx";
+import { ApprovalActions, ApprovalNotice, SendModal } from "./components/ApprovalFlow.jsx";
+import ReviewPanel from "./components/ReviewPanel.jsx";
+import { SignoffLog } from "./components/SignoffLog.jsx";
+import { loadName, loadRole, markPublished, markSeen, markSignedOff, saveName, saveRole, submitToManager, useWorkflow } from "./lib/workflow.js";
 
 import { derivePolicy, groupFindings } from "./lib/insights.js";
 import { analyzeDocument, computeRisk, policyToText, tidy as tidySentence } from "./lib/policyEngine.js";
@@ -41,7 +46,26 @@ const nextId = (p) => `${p}-${Date.now().toString(36)}-${(uid++).toString(36)}`;
 export default function App() {
   // navigation
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [view, setView] = useState("workspace");
+  // Round 3: three panels share one workflow store (localStorage). Each panel keeps its own page.
+  const [role, setRoleState] = useState(loadRole);
+  const [views, setViews] = useState({ creator: "workspace", manager: "approvals", legal: "legal" });
+  const view = views[role];
+  const setView = useCallback((v) => setViews((vs) => ({ ...vs, [role]: v })), [role]);
+  const setCreatorView = useCallback((v) => setViews((vs) => ({ ...vs, creator: v })), []);
+  const setRole = useCallback((r) => {
+    setRoleState(r);
+    saveRole(r);
+    setDrawerOpen(false);
+  }, []);
+  const workflow = useWorkflow();
+  const [currentSubId, setCurrentSubId] = useState(null);
+  const currentSub = workflow.submissions.find((s) => s.id === currentSubId) || null;
+  const [sendOpen, setSendOpen] = useState(false);
+  // Improvement 1: audited images (logo, colours, text in image) for the current document
+  const [visualImages, setVisualImages] = useState([]);
+  // fixes the creator applied, sent to the manager with the submission
+  const [improvements, setImprovements] = useState([]);
+  const addImprovement = useCallback((t) => setImprovements((l) => [...l, t].slice(-80)), []);
   // Company / brand name: tags every audit and publication so managers can filter the charts.
   const [company, setCompanyState] = useState(() => {
     try {
@@ -194,7 +218,8 @@ export default function App() {
     return { ...analysis, findings: [...ruleFindings, ...aiOnly] };
   }, [analysis, ai, text]);
 
-  const risk = useMemo(() => (merged ? computeRisk(merged.findings, merged.tone, dismissed) : null), [merged, dismissed]);
+  const visualFindings = useMemo(() => visualImages.flatMap((i) => [...i.findings, ...(i.adFindings || [])]), [visualImages]);
+  const risk = useMemo(() => (merged ? computeRisk([...merged.findings, ...visualFindings], merged.tone, dismissed) : null), [merged, visualFindings, dismissed]);
 
   const issueGroups = useMemo(() => (merged ? groupFindings(merged.findings, dismissed) : []), [merged, dismissed]);
 
@@ -212,7 +237,7 @@ export default function App() {
         policy_document: policyDoc ? { name: policyDoc.name, text: policyDoc.text } : null,
         tone_profile: policy.tone || "Professional",
         // the dashboard's own rule checks, so the charts count PII / banned terms too
-        rule_findings: (analysis?.findings ?? []).filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
+        rule_findings: [...(analysis?.findings ?? []), ...visualFindings].filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
         company: company.trim(),
       });
       setAi({ status: "done", result, error: null, textAtRun: snapshot, ranAt: Date.now() });
@@ -228,7 +253,34 @@ export default function App() {
       log(`AI audit failed: ${e.message}`, "AI");
       toast(`AI audit failed: ${e.message}`, "danger");
     }
-  }, [text, title, source, policy, policyDoc, engine.status, log, toast, analysis, dismissed, company]);
+  }, [text, title, source, policy, policyDoc, engine.status, log, toast, analysis, dismissed, company, visualFindings]);
+
+  // Improvement 1: ad / body text read from an image goes through the rule checks + AI deep audit.
+  const runAdTextAudit = useCallback(
+    async (adText, imageName, imageFindings) => {
+      const local = analyzeDocument(adText, policy).findings.map((f) => ({ ...f, id: `${f.id}-${imageName}`, image: imageName }));
+      try {
+        const result = await api.audit({
+          text: adText,
+          title: `${imageName} (text in image)`,
+          source: "image",
+          policy_rules: policyToText(policy),
+          policy_document: policyDoc ? { name: policyDoc.name, text: policyDoc.text } : null,
+          tone_profile: policy.tone || "Professional",
+          rule_findings: [...imageFindings, ...local].filter((f) => f.verdict !== "VERIFIED").map(toServerFinding),
+          company: company.trim(),
+        });
+        const aiFindings = result.findings.map((f) => ({ ...toUiFinding(f), image: imageName }));
+        const overlap = (r) => aiFindings.some((x) => (x.match || "").toLowerCase().includes((r.match || "").toLowerCase()) && r.match);
+        log(`AI deep audit of the text in ${imageName}: ${result.counts.CONTRADICTED} contradicted, ${result.counts.UNVERIFIED} unverified, ${result.counts.VERIFIED} verified`, "AI");
+        return { findings: [...local.filter((r) => !overlap(r)), ...aiFindings], note: result.audit_id ? `AI: ${result.model} · Neon audit #${result.audit_id}` : `AI: ${result.model}` };
+      } catch (e) {
+        log(`AI deep audit of ${imageName} failed: ${e.message}`, "AI");
+        return { findings: local, note: `AI deep audit unavailable (${e.message}). Showing the instant rule checks only.` };
+      }
+    },
+    [policy, policyDoc, company, log],
+  );
 
   const lastLevel = useRef(null);
   useEffect(() => {
@@ -251,10 +303,13 @@ export default function App() {
       setAi({ status: "idle", result: null, error: null, textAtRun: "" });
       lastLevel.current = null;
       setActivePubId(null);
-      setView("workspace");
+      setVisualImages([]);
+      setImprovements([]);
+      setCurrentSubId(null);
+      setCreatorView("workspace");
       setDrawerOpen(false);
     },
-    [],
+    [setCreatorView],
   );
 
   const handleFile = useCallback(
@@ -301,7 +356,10 @@ export default function App() {
     setDismissed({});
     setAi({ status: "idle", result: null, error: null, textAtRun: "" });
     setActivePubId(null);
-    setView("workspace");
+    setVisualImages([]);
+    setImprovements([]);
+    setCurrentSubId(null);
+    setCreatorView("workspace");
     setDrawerOpen(false);
   };
 
@@ -318,6 +376,7 @@ export default function App() {
     if (!ok) return toast("Couldn't find that text - it may already have been edited.");
     syncFromEditor();
     log(`Accepted AI fix (${f.clause}): "${f.suggestion.find.trim()}" → "${f.suggestion.replace || "removed"}"`);
+    addImprovement(`${f.clause}: "${f.suggestion.find.trim()}" → "${f.suggestion.replace || "removed"}"`);
   };
 
   const onAcceptAll = (list) => {
@@ -343,6 +402,7 @@ export default function App() {
     });
     syncFromEditor();
     log(`Accepted ${applied} AI suggestion(s) in bulk`);
+    list.slice(0, 40).forEach((f) => addImprovement(`${f.clause}: "${f.suggestion.find.trim()}" → "${f.suggestion.replace || "removed"}"`));
     toast(`${applied} fix${applied === 1 ? "" : "es"} applied. Re-scanning…`, "success");
   };
 
@@ -351,6 +411,7 @@ export default function App() {
     if (!ok) return toast("Couldn't find that sentence - it may already have been edited.");
     syncFromEditor();
     log(`Manually rewrote a flagged sentence (${f.clause})`);
+    addImprovement(`Rewrote a flagged sentence (${f.clause}): "${draft.trim().slice(0, 140)}"`);
   };
 
   const onDismiss = (f, reason) => {
@@ -368,13 +429,96 @@ export default function App() {
   };
 
   // ------------------------------------------------------------ publish
-  const canPublish = !!(mode && analysis && !scanning && text.trim().length > 0);
+  // Ready to send = content is checked. Publishing additionally needs manager + legal approval of THIS version.
+  const canSend = !!(mode && analysis && !scanning && text.trim().length > 0);
+  const approved = !!(currentSub && currentSub.status === "approved" && currentSub.text === text);
+  const canPublish = canSend && approved;
   const onPublish = () => {
-    if (!canPublish) return;
-    setView("workspace");
-    setModal(risk.level === "HIGH" ? "high" : "ready");
-    log(`Clicked Publish at ${risk.level} RISK`);
+    if (!canPublish) {
+      toast("Publishing is locked. Send the content to your manager; it unlocks once the manager and legal approver approve it.");
+      return;
+    }
+    setCreatorView("workspace");
+    setModal("ready");
+    log(`Clicked Publish (approved, ${risk.level} RISK)`);
   };
+
+  const sendSummary = risk
+    ? {
+        title,
+        risk,
+        ai: ai.result ? { model: ai.result.model } : null,
+        aiStale: !!ai.result && text !== ai.textAtRun,
+        visual: {
+          images: visualImages.length,
+          contradicted: visualFindings.filter((f) => f.verdict === "CONTRADICTED" && !dismissed[f.id]).length,
+          unverified: visualFindings.filter((f) => f.verdict === "UNVERIFIED" && !dismissed[f.id]).length,
+        },
+        improvements: improvements.length,
+        overrides: Object.keys(dismissed).length,
+      }
+    : null;
+
+  const sendToManager = ({ name, note }) => {
+    saveName("creator", name);
+    const open = (merged?.findings ?? []).filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]);
+    const allFindings = [...(merged?.findings ?? []), ...visualFindings];
+    const payload = {
+      title,
+      company: company.trim(),
+      text,
+      risk: { level: risk.level, score: risk.score, counts: risk.counts, reasons: risk.reasons },
+      tone: merged?.tone ? { score: merged.tone.score, profile: merged.tone.profile } : null,
+      ai: ai.result
+        ? { model: ai.result.model, auditId: ai.result.audit_id ?? null, counts: ai.result.counts, stale: text !== ai.textAtRun, ranAt: ai.ranAt || Date.now() }
+        : null,
+      findings: open.slice(0, 40).map((f) => ({
+        verdict: f.verdict,
+        severity: f.severity,
+        category: f.category,
+        match: String(f.match || "").slice(0, 160),
+        explanation: String(f.explanation || "").slice(0, 400),
+      })),
+      improvements: [...improvements],
+      overrides: allFindings
+        .filter((f) => dismissed[f.id])
+        .map((f) => ({ verdict: f.verdict, match: String(f.match || "").slice(0, 120), reason: dismissed[f.id] })),
+      visual: visualImages.length
+        ? {
+            images: visualImages.map((i) => ({
+              name: i.name,
+              thumb: i.thumb,
+              findings: i.findings.filter((f) => !dismissed[f.id]).map(({ id, verdict, severity, category, match, explanation, recommendation }) => ({ id, verdict, severity, category, match, explanation, recommendation })),
+              adFindings: (i.adFindings || []).filter((f) => !dismissed[f.id]).map(({ id, verdict, severity, category, match, explanation }) => ({ id, verdict, severity, category, match, explanation })),
+            })),
+          }
+        : null,
+      policyName: policyDoc ? `${policyDoc.name} + PUBLIVRA built-in rules` : policy.name,
+    };
+    const resubmit = !!currentSub;
+    const id = submitToManager({ id: currentSub?.id, creatorName: name, note, payload });
+    setCurrentSubId(id);
+    setSendOpen(false);
+    log(`${resubmit ? "Re-submitted" : "Sent"} "${title}" to the manager for approval${note ? ` - note: ${note}` : ""}`);
+    api.logEvent({ actor: name, action: resubmit ? "resubmit_to_manager" : "send_to_manager", detail: `${title} (risk ${risk.level} ${risk.score}/100)`, audit_id: ai.result?.audit_id ?? null });
+    toast(`${resubmit ? "Re-submitted" : "Sent"} to the manager. Publishing unlocks once it is approved.`, "success");
+  };
+
+  // Creator notifications when a reviewer decides
+  const lastStatus = useRef({});
+  useEffect(() => {
+    if (!currentSub) return;
+    const prev = lastStatus.current[currentSub.id];
+    lastStatus.current[currentSub.id] = currentSub.status;
+    if (!prev || prev === currentSub.status) return;
+    if (currentSub.status === "approved") toast("Approved! Ready to Publish - the Publish & sign-off button is unlocked.", "success");
+    if (currentSub.status === "rejected")
+      toast(`Changes requested by the ${currentSub.rejection?.role === "legal" ? "legal approver" : "manager"}: ${currentSub.rejection?.reason}`, "danger");
+    if (currentSub.status === "pending_legal") toast("Your manager approved and forwarded it to the legal approver.");
+  }, [currentSub, toast]);
+  useEffect(() => {
+    if (role === "creator" && view === "workspace" && currentSub && !currentSub.seenByCreator) markSeen(currentSub.id);
+  }, [role, view, currentSub]);
 
   const doPublish = (fileName, overridden) => {
     const at = Date.now();
@@ -390,10 +534,16 @@ export default function App() {
       overridden,
       publishedAt: at,
       sourceLabel: source?.type === "upload" ? `${source.kind} upload - ${source.name}` : "PUBLIVRA inbuilt editor",
+      approvals: currentSub
+        ? currentSub.authority === "dual"
+          ? `Approved by ${currentSub.approvals.manager?.name} as manager and legal approver (version ${currentSub.version}).`
+          : `Approved by manager ${currentSub.approvals.manager?.name} and legal approver ${currentSub.approvals.legal?.name} (version ${currentSub.version}).`
+        : null,
     });
     const name = `${slugify(fileName)}.pdf`;
     downloadBlob(blob, name);
-    const pub = { id: nextId("pub"), title, fileName: name, at, risk, overridden, status: "pending", serverId: null };
+    const pub = { id: nextId("pub"), title, fileName: name, at, risk, overridden, status: "pending", serverId: null, subId: currentSub?.id ?? null };
+    if (currentSub) markPublished(currentSub.id, { fileName: name, creatorName: currentSub.creatorName });
     pdfStore.current[pub.id] = blob;
     setPublications((p) => [pub, ...p]);
     setActivePubId(pub.id);
@@ -408,7 +558,7 @@ export default function App() {
         overridden,
         counts: risk.counts,
         // final state after the creator's fixes -> the "after publication" chart
-        findings: merged.findings.filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
+        findings: [...merged.findings, ...visualFindings].filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
         tone_score: merged.tone?.score != null ? Math.round(merged.tone.score) : null,
         company: company.trim(),
       })
@@ -419,7 +569,7 @@ export default function App() {
         } else log("Publication kept locally (database not reachable)", "AI");
       })
       .catch((e) => log(`Publication kept locally - ${e.message}`, "AI"));
-    setView("verification");
+    setCreatorView("verification");
     if (overridden) {
       log(`Typed "confirm" and overrode the HIGH RISK gate - downloaded ${name}`);
       toast("PDF downloaded by override. PUBLIVRA AI will not be held responsible for compliance breaches.", "danger");
@@ -434,6 +584,7 @@ export default function App() {
   const closePublication = (approver) => {
     setPublications((ps) => ps.map((p) => (p.id === activePub.id ? { ...p, status: "closed", approver, closedAt: Date.now() } : p)));
     log(`Human verification completed by ${approver.name} (${approver.role}) - project closed`);
+    if (activePub.subId) markSignedOff(activePub.subId, { name: approver.name, role: approver.role });
     if (activePub.serverId) {
       api
         .verifyPublication(activePub.serverId, { approver_name: approver.name, approver_role: approver.role, checklist: approver.checklist || [] })
@@ -455,6 +606,12 @@ export default function App() {
   const currentPub = publications.find((p) => p.id === activePubId);
   if (currentPub) step = currentPub.status === "closed" ? 5 : 4;
   const pendingCount = publications.filter((p) => p.status === "pending").length;
+  const roleBadges = {
+    creator: workflow.submissions.filter((s) => !s.seenByCreator).length,
+    manager: workflow.submissions.filter((s) => s.status === "pending_manager").length,
+    legal: workflow.submissions.filter((s) => s.status === "pending_legal").length,
+  };
+  const navBadges = { verification: pendingCount, approvals: roleBadges.manager, legal: roleBadges.legal, workspace: roleBadges.creator };
 
   return (
     <div className="min-h-full">
@@ -468,6 +625,9 @@ export default function App() {
         canPublish={canPublish}
         engine={engine}
         onRetryEngine={checkEngine}
+        role={role}
+        onRole={setRole}
+        roleBadges={roleBadges}
       />
       <Drawer
         open={drawerOpen}
@@ -477,14 +637,17 @@ export default function App() {
           setView(v);
           setDrawerOpen(false);
         }}
-        badges={{ verification: pendingCount }}
+        badges={navBadges}
         onNewDocument={newAudit}
         policyName={policyDoc ? policyDoc.name : "PUBLIVRA built-in rules"}
+        role={role}
+        onRole={setRole}
+        roleBadges={roleBadges}
       />
 
       <main className="mx-auto max-w-[1600px] px-3 py-5 sm:px-5">
         {/* Workspace stays mounted so the document survives navigation. */}
-        <div className={view === "workspace" ? "" : "hidden"}>
+        <div className={role === "creator" && view === "workspace" ? "" : "hidden"}>
           {!mode ? (
             <StartScreen onStart={onStart} toast={toast} currentPolicy={policyDoc} />
           ) : (
@@ -496,8 +659,14 @@ export default function App() {
                 <Stepper current={step} />
               </div>
 
+              <ApprovalNotice submission={currentSub} text={text} onGoToSignoff={() => setCreatorView("verification")} />
               {risk ? (
-                <RiskBanner risk={risk} onPublish={onPublish} canPublish={canPublish} scanning={scanning} />
+                <RiskBanner
+                  risk={risk}
+                  scanning={scanning}
+                  extraCounts={visualImages.length ? `${visualImages.length} audited image${visualImages.length === 1 ? "" : "s"}` : null}
+                  actions={<ApprovalActions submission={currentSub} text={text} canSend={canSend} onPublish={onPublish} onSend={() => setSendOpen(true)} />}
+                />
               ) : (
                 <div className="h-[104px] animate-pulse rounded-2xl border border-slate-800 bg-slate-900/60" />
               )}
@@ -519,6 +688,15 @@ export default function App() {
                 onReplaceContent={() => replaceInputRef.current?.click()}
                 onViewPolicy={() => openPolicyRef(null)}
                 toast={toast}
+              />
+
+              <VisualAudit
+                policyText={policyDoc?.text || ""}
+                images={visualImages}
+                onImagesChange={setVisualImages}
+                onAuditAdText={runAdTextAudit}
+                toast={toast}
+                log={log}
               />
 
               <div className="grid gap-4 xl:h-[calc(100vh-250px)] xl:min-h-[640px] xl:grid-cols-[minmax(0,1fr)_430px]">
@@ -570,7 +748,7 @@ export default function App() {
           )}
         </div>
 
-        {view === "verification" && (
+        {role === "creator" && view === "verification" && (
           <HumanVerification
             publication={activePub}
             onClose={closePublication}
@@ -579,8 +757,12 @@ export default function App() {
             onGoToWorkspace={() => setView("workspace")}
           />
         )}
-        {view === "insights" && <Insights company={company} onCompanyChange={setCompany} />}
+        {(role === "manager" || role === "legal") && (view === "approvals" || view === "legal") && <ReviewPanel role={role} workflow={workflow} toast={toast} />}
+        {view === "insights" && role !== "legal" && <Insights role={role} company={company} onCompanyChange={setCompany} />}
         {view === "history" && (
+          <div className="mx-auto max-w-6xl space-y-6">
+            <SignoffLog workflow={workflow} />
+            {role !== "legal" && (
           <AuditTrail
             publications={publications}
             activity={activity}
@@ -590,6 +772,8 @@ export default function App() {
               setView("verification");
             }}
           />
+            )}
+          </div>
         )}
       </main>
 
@@ -601,6 +785,14 @@ export default function App() {
         risk={risk}
         findings={(merged?.findings ?? []).filter((f) => !dismissed[f.id])}
         defaultName={slugify(title)}
+      />
+      <SendModal
+        open={sendOpen}
+        onClose={() => setSendOpen(false)}
+        onConfirm={sendToManager}
+        summary={sendSummary}
+        defaultName={currentSub?.creatorName || loadName("creator")}
+        resubmit={!!currentSub}
       />
       <PolicyViewer open={!!viewer} onClose={() => setViewer(null)} doc={viewer?.doc} target={viewer?.target} />
       <Toasts toasts={toasts} dismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />

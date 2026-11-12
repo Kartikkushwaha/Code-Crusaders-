@@ -7,7 +7,7 @@ const ITEMS = [
   { id: "unverified", text: "Unverified claims now cite an approved source, were softened, or were removed." },
   { id: "privacy", text: "No personal data, credentials or confidential material is exposed in the final file." },
   { id: "tone", text: "Tone and persona match the brand guidelines for this audience." },
-  { id: "visual", text: "Images, logos and layout were checked manually (automated visual audit arrives in Round 3)." },
+  { id: "visual", text: "Images passed the visual audit (logo, brand colours, brand name and motto), or were checked manually." },
   { id: "accountability", text: "I accept accountability as the human approver for this publication." },
 ];
 

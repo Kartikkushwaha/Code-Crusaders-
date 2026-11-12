@@ -1,7 +1,7 @@
-import { TriangleAlert, ShieldAlert, ShieldCheck, Rocket } from "lucide-react";
-import { RISK_STYLE, Button } from "./ui.jsx";
+import { TriangleAlert, ShieldAlert, ShieldCheck } from "lucide-react";
+import { RISK_STYLE } from "./ui.jsx";
 
-export default function RiskBanner({ risk, onPublish, canPublish, scanning }) {
+export default function RiskBanner({ risk, scanning, actions, extraCounts }) {
   const s = RISK_STYLE[risk.level];
   const Icon = risk.level === "HIGH" ? ShieldAlert : risk.level === "MEDIUM" ? TriangleAlert : ShieldCheck;
   return (
@@ -25,7 +25,8 @@ export default function RiskBanner({ risk, onPublish, canPublish, scanning }) {
           <div className={`h-full rounded-full transition-all duration-500 ${s.meter}`} style={{ width: `${Math.max(3, risk.score)}%` }} />
         </div>
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-300">
-          {risk.reasons.length ? risk.reasons.map((r) => <span key={r}>• {r}</span>) : <span>• No open issues - ready for human sign-off</span>}
+          {risk.reasons.length ? risk.reasons.map((r) => <span key={r}>• {r}</span>) : <span>• No open issues - send it to your manager for approval</span>}
+          {extraCounts ? <span className="text-slate-400">• includes {extraCounts}</span> : null}
         </div>
       </div>
 
@@ -35,9 +36,7 @@ export default function RiskBanner({ risk, onPublish, canPublish, scanning }) {
           <Count n={risk.counts.unverified} label="Unverified" cls="text-amber-300" />
           <Count n={risk.counts.contradicted} label="Contradicted" cls="text-rose-300" />
         </div>
-        <Button variant={risk.level === "HIGH" ? "danger" : "primary"} onClick={onPublish} disabled={!canPublish} className="w-full sm:w-auto">
-          <Rocket className="h-4 w-4" /> Publish
-        </Button>
+        {actions}
       </div>
     </section>
   );

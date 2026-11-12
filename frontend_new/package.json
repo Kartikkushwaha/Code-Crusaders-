@@ -1,7 +1,7 @@
 {
   "name": "publivra-ai-frontend",
   "private": true,
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "PUBLIVRA AI - evidence-based brand compliance & governance dashboard (CodeNexus India 2026, Round 2)",
   "type": "module",
   "scripts": {

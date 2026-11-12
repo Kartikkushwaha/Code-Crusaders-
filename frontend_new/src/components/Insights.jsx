@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, BarChart3, Building2, CheckCircle2, LoaderCircle, RefreshCw, ShieldAlert, Table2 } from "lucide-react";
+import { AlertTriangle, BarChart3, Building2, CheckCircle2, Globe, LoaderCircle, RefreshCw, Repeat2, ShieldAlert, Table2 } from "lucide-react";
 import { api } from "../lib/api.js";
 
 // Validated categorical pair for the dark surface (blue = before, orange = after).
@@ -82,15 +82,69 @@ function Tooltip({ bar, stage }) {
   );
 }
 
-/** Vertical bar chart: x = section, y = average risk 0-100. One or two series (before / after). */
+/** "Repeated issues" indicator under each bar: hover or click for the recurring issues. */
+function RepeatIndicator({ index, count, data, stages, pinned, onPin, align }) {
+  const [hover, setHover] = useState(false);
+  const items = stages.flatMap((st) => data[st].bars[index].top_issues.filter((t) => t.times >= 2).map((t) => ({ ...t, stage: st })));
+  const open = hover || pinned;
+  const n = new Set(items.map((t) => t.issue)).size;
+  const pos = align === "left" ? "left-0" : align === "right" ? "right-0" : "left-1/2 -translate-x-1/2";
+  return (
+    <div className="relative mt-1 flex justify-center" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      <button
+        onClick={onPin}
+        aria-expanded={open}
+        aria-label={`${n} repeated issue${n === 1 ? "" : "s"}`}
+        className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${
+          n ? "border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20" : "border-slate-800 text-slate-500"
+        } ${pinned ? "ring-1 ring-amber-400" : ""}`}
+      >
+        <Repeat2 className="h-3 w-3" aria-hidden="true" />
+        <span className="sm:hidden">{n || "0"}</span>
+        <span className="hidden sm:inline">{n ? `${n} repeated` : "No repeats"}</span>
+      </button>
+      {open && (
+        <div className={`absolute bottom-full z-30 mb-1.5 w-64 rounded-xl border border-slate-700 bg-slate-950/95 p-3 text-left shadow-2xl ${pos}`} role="dialog" aria-label="Repeated issues">
+          <div className="text-[11px] font-semibold text-white">Repeated issues</div>
+          <p className="text-[10px] text-slate-500">Issues found in 2 or more documents{count > 1 ? " (both stages)" : ""}.</p>
+          {items.length ? (
+            <ul className="mt-2 max-h-56 space-y-1.5 overflow-y-auto">
+              {items.map((t) => (
+                <li key={`${t.stage}:${t.issue}`} className="rounded-lg border border-slate-800 bg-slate-900/70 p-2 text-[11px] leading-snug">
+                  <div className="flex items-start gap-1.5">
+                    <span className="mt-1 h-2 w-2 shrink-0 rounded-sm" style={{ background: SERIES[t.stage].color }} title={SERIES[t.stage].label} />
+                    <span className="min-w-0 flex-1 break-words text-slate-200">{t.issue.length > 110 ? `${t.issue.slice(0, 110)}…` : t.issue}</span>
+                    <b className="shrink-0 text-amber-200">{t.times}×</b>
+                  </div>
+                  {(t.example || t.policy_line) && (
+                    <div className="mt-0.5 break-words pl-3.5 text-[10px] text-slate-500">
+                      {t.example && <>e.g. “{t.example.slice(0, 60)}”</>}
+                      {t.example && t.policy_line && " · "}
+                      {t.policy_line && <>policy {t.policy_line}</>}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-2 text-[11px] text-slate-400">No issue has come up more than once here.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Vertical bar chart: x = violation type, y = average risk 0-100. One or two series (before / after). */
 function BarChart({ data, stages, selected, onSelect }) {
   const [hover, setHover] = useState(null); // `${key}:${stage}`
+  const [pinnedRepeat, setPinnedRepeat] = useState(null);
   const sections = data[stages[0]].bars;
   const ticks = [100, 60, 25, 0];
   return (
     <div className="relative pl-9 pr-1 pt-4">
       {/* recessive grid: risk-level thresholds */}
-      <div className="absolute inset-x-0 bottom-[4.5rem] top-4 pl-9">
+      <div className="absolute inset-x-0 bottom-[6rem] top-4 pl-9">
         {ticks.map((t) => (
           <div key={t} className="absolute inset-x-0 flex items-center" style={{ bottom: `${t}%` }}>
             <span className="absolute -left-9 w-7 -translate-y-px text-right text-[10px] text-slate-500">{t}</span>
@@ -132,7 +186,7 @@ function BarChart({ data, stages, selected, onSelect }) {
                 );
               })}
             </button>
-            <div className="mt-2 h-16 w-full text-center">
+            <div className="mt-2 h-[5.5rem] w-full text-center">
               <div className="truncate text-xs font-semibold text-slate-200">
                 <span className="sm:hidden">{SHORT[sec.key] || sec.label}</span>
                 <span className="hidden sm:inline">{sec.label}</span>
@@ -142,6 +196,15 @@ function BarChart({ data, stages, selected, onSelect }) {
                   <LevelTag key={st} level={data[st].bars[i].level} />
                 ))}
               </div>
+              <RepeatIndicator
+                index={i}
+                count={stages.length}
+                data={data}
+                stages={stages}
+                pinned={pinnedRepeat === sec.key}
+                onPin={() => setPinnedRepeat((p) => (p === sec.key ? null : sec.key))}
+                align={i === 0 ? "left" : i === sections.length - 1 ? "right" : "center"}
+              />
             </div>
           </div>
         ))}
@@ -235,27 +298,27 @@ function DataTableView({ data, stages }) {
   );
 }
 
-export default function Insights({ company, onCompanyChange }) {
+/** One chart card with its own filters. company = "" -> all checks (common graph). */
+function ChartCard({ title, subtitle, icon: Icon, company, needsCompany }) {
   const [mode, setMode] = useState("compare"); // before | after | compare
-  const [scope, setScope] = useState("all"); // all | mine
   const [days, setDays] = useState(0);
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [selected, setSelected] = useState(null);
   const [asTable, setAsTable] = useState(false);
-  const [draft, setDraft] = useState(company);
 
-  useEffect(() => setDraft(company), [company]);
-
-  const filterCompany = scope === "mine" ? company.trim() : "";
   const load = useCallback(async () => {
+    if (needsCompany && !company) {
+      setState({ loading: false, error: null, data: null });
+      return;
+    }
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
-      const data = await api.analytics({ company: filterCompany, days });
+      const data = await api.analytics({ company, days });
       setState({ loading: false, error: null, data });
     } catch (e) {
       setState({ loading: false, error: e.message, data: null });
     }
-  }, [filterCompany, days]);
+  }, [company, days, needsCompany]);
 
   useEffect(() => {
     load();
@@ -267,13 +330,110 @@ export default function Insights({ company, onCompanyChange }) {
   const dbState = data?.before?.db;
 
   return (
+    <section className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/60 p-4" aria-label={title}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-white">
+            <Icon className="h-4 w-4 text-indigo-400" /> {title}
+          </h2>
+          <p className="mt-0.5 text-[11px] text-slate-400">{subtitle}</p>
+        </div>
+        {stages.length > 1 ? (
+          <div className="flex flex-wrap gap-3 text-[11px] text-slate-400">
+            {stages.map((st) => (
+              <span key={st} className="inline-flex items-center gap-1.5">
+                <span className="h-2.5 w-2.5 rounded-sm" style={{ background: SERIES[st].color }} />
+                {SERIES[st].label} ({data?.[st]?.documents ?? 0})
+              </span>
+            ))}
+          </div>
+        ) : (
+          data && <span className="text-[11px] text-slate-400">{data[stages[0]].documents} documents</span>
+        )}
+      </div>
+
+      {/* filters: one row above the chart */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Segmented
+          label="Stage"
+          value={mode}
+          onChange={setMode}
+          options={[
+            { v: "before", label: "Before" },
+            { v: "after", label: "After" },
+            { v: "compare", label: "Compare" },
+          ]}
+        />
+        <Segmented label="Time range" value={days} onChange={setDays} options={DAYS.map((d) => ({ v: d.v, label: d.label }))} />
+        <div className="ml-auto flex gap-2">
+          <button onClick={() => setAsTable((t) => !t)} className="inline-flex items-center gap-1 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800">
+            {asTable ? <BarChart3 className="h-3.5 w-3.5" /> : <Table2 className="h-3.5 w-3.5" />} {asTable ? "Chart" : "Table"}
+          </button>
+          <button onClick={load} className="inline-flex items-center gap-1 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800">
+            <RefreshCw className={`h-3.5 w-3.5 ${state.loading ? "animate-spin" : ""}`} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      {needsCompany && !company ? (
+        <div className="flex h-56 flex-col items-center justify-center gap-1 text-center text-xs text-amber-200">
+          <Building2 className="h-6 w-6 text-amber-300/70" />
+          Enter the company name at the top of this page to see its graph.
+          <span className="text-slate-500">Checks and publications are tagged with the company set there.</span>
+        </div>
+      ) : state.loading && !data ? (
+        <div className="flex h-72 items-center justify-center gap-2 text-xs text-slate-400">
+          <LoaderCircle className="h-4 w-4 animate-spin" /> Loading the graph (the server may take a moment to wake up)…
+        </div>
+      ) : state.error ? (
+        <div className="flex h-72 flex-col items-center justify-center gap-2 text-center text-xs text-rose-300">
+          Could not load the graph: {state.error}
+          <button onClick={load} className="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800">
+            Try again
+          </button>
+        </div>
+      ) : dbState && dbState !== "connected" ? (
+        <div className="flex h-72 items-center justify-center text-center text-xs text-amber-200">The database is {dbState.replace("_", " ")}, so there is nothing to chart yet.</div>
+      ) : total === 0 ? (
+        <div className="flex h-72 flex-col items-center justify-center gap-1 text-center text-xs text-slate-400">
+          <BarChart3 className="h-6 w-6 text-slate-600" />
+          No {mode === "after" ? "publications" : mode === "before" ? "AI audits" : "checks"} recorded{company ? ` for ${company}` : ""} yet.
+          <span className="text-slate-500">Run an AI deep audit or publish a document to see the bars.</span>
+        </div>
+      ) : asTable ? (
+        <DataTableView data={data} stages={stages} />
+      ) : (
+        <BarChart data={data} stages={stages} selected={selected} onSelect={setSelected} />
+      )}
+      {!asTable && data && total > 0 && (
+        <p className="text-[10px] text-slate-500">
+          X-axis: violation type. Bar height: average risk (0-100); Low under 25, Medium 25-59, High 60+. Hover a bar for details, click it for the full list; hover or click
+          “repeated” for issues that keep coming back.
+        </p>
+      )}
+      {data && total > 0 && selected && <DetailPanel sectionKey={selected} data={data} stages={stages} />}
+    </section>
+  );
+}
+
+/**
+ * Improvement 2 - analytics.
+ * Common graph: Creator & Manager panels. Company graph: Manager panel only.
+ */
+export default function Insights({ role, company, onCompanyChange }) {
+  const [draft, setDraft] = useState(company);
+  useEffect(() => setDraft(company), [company]);
+  const isManager = role === "manager";
+  return (
     <div className="mx-auto max-w-6xl space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="flex items-center gap-2 text-xl font-bold text-white">
             <BarChart3 className="h-5 w-5 text-indigo-400" /> Insights
           </h1>
-          <p className="mt-1 text-xs text-slate-400">Average risk per section across your checks, before and after publishing.</p>
+          <p className="mt-1 text-xs text-slate-400">
+            Average risk per violation type, before and after publishing{isManager ? ", across all checks and for your company" : ""}.
+          </p>
         </div>
         <form
           className="flex items-center gap-2"
@@ -290,100 +450,22 @@ export default function Insights({ company, onCompanyChange }) {
               onChange={(e) => setDraft(e.target.value)}
               onBlur={() => draft.trim() !== company && onCompanyChange(draft.trim())}
               placeholder="e.g. Proclinical"
+              aria-label="Company"
               className="w-32 bg-transparent text-slate-100 placeholder:text-slate-600 focus:outline-none sm:w-40"
             />
           </label>
         </form>
       </div>
-
-      {/* filters: one row above the chart */}
-      <div className="flex flex-wrap items-center gap-2">
-        <Segmented
-          label="Stage"
-          value={mode}
-          onChange={(v) => {
-            setMode(v);
-          }}
-          options={[
-            { v: "before", label: "Before" },
-            { v: "after", label: "After" },
-            { v: "compare", label: "Compare" },
-          ]}
+      <ChartCard title="Common graph" subtitle="All checks across every company." icon={Globe} company="" />
+      {isManager && (
+        <ChartCard
+          title={company ? `Company graph - ${company}` : "Company graph"}
+          subtitle="Same graph, only for checks and publications tagged with your company. Visible to managers only."
+          icon={Building2}
+          company={company}
+          needsCompany
         />
-        <Segmented
-          label="Scope"
-          value={scope}
-          onChange={setScope}
-          options={[
-            { v: "all", label: "All checks" },
-            { v: "mine", label: company ? company : "My company" },
-          ]}
-        />
-        <Segmented label="Time range" value={days} onChange={setDays} options={DAYS.map((d) => ({ v: d.v, label: d.label }))} />
-        <div className="ml-auto flex gap-2">
-          <button onClick={() => setAsTable((t) => !t)} className="inline-flex items-center gap-1 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800">
-            {asTable ? <BarChart3 className="h-3.5 w-3.5" /> : <Table2 className="h-3.5 w-3.5" />} {asTable ? "Chart" : "Table"}
-          </button>
-          <button onClick={load} className="inline-flex items-center gap-1 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800">
-            <RefreshCw className={`h-3.5 w-3.5 ${state.loading ? "animate-spin" : ""}`} /> Refresh
-          </button>
-        </div>
-      </div>
-
-      {scope === "mine" && !company && (
-        <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          Enter your company name above. New checks and publications are tagged with it, so this view fills up as you work.
-        </p>
       )}
-
-      <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-white">Risk by section</h2>
-          {stages.length > 1 && (
-            <div className="flex flex-wrap gap-3 text-[11px] text-slate-400">
-              {stages.map((st) => (
-                <span key={st} className="inline-flex items-center gap-1.5">
-                  <span className="h-2.5 w-2.5 rounded-sm" style={{ background: SERIES[st].color }} />
-                  {SERIES[st].label} ({data?.[st]?.documents ?? 0})
-                </span>
-              ))}
-            </div>
-          )}
-          {stages.length === 1 && data && <span className="text-[11px] text-slate-400">{data[stages[0]].documents} documents</span>}
-        </div>
-
-        {state.loading && !data ? (
-          <div className="flex h-72 items-center justify-center gap-2 text-xs text-slate-400">
-            <LoaderCircle className="h-4 w-4 animate-spin" /> Loading charts (the server may take a moment to wake up)…
-          </div>
-        ) : state.error ? (
-          <div className="flex h-72 flex-col items-center justify-center gap-2 text-center text-xs text-rose-300">
-            Could not load insights: {state.error}
-            <button onClick={load} className="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800">
-              Try again
-            </button>
-          </div>
-        ) : dbState && dbState !== "connected" ? (
-          <div className="flex h-72 items-center justify-center text-center text-xs text-amber-200">
-            The database is {dbState.replace("_", " ")}, so there is nothing to chart yet.
-          </div>
-        ) : total === 0 ? (
-          <div className="flex h-72 flex-col items-center justify-center gap-1 text-center text-xs text-slate-400">
-            <BarChart3 className="h-6 w-6 text-slate-600" />
-            No {mode === "after" ? "publications" : mode === "before" ? "AI audits" : "checks"} recorded for this filter yet.
-            <span className="text-slate-500">Run an AI deep audit or publish a document to see the bars.</span>
-          </div>
-        ) : asTable ? (
-          <DataTableView data={data} stages={stages} />
-        ) : (
-          <BarChart data={data} stages={stages} selected={selected} onSelect={setSelected} />
-        )}
-        {!asTable && data && total > 0 && (
-          <p className="mt-1 text-[10px] text-slate-500">Bar height = average risk score (0-100). Levels: Low under 25, Medium 25-59, High 60+. Hover for details, click a section for the full list.</p>
-        )}
-      </section>
-
-      {data && total > 0 && selected && <DetailPanel sectionKey={selected} data={data} stages={stages} />}
     </div>
   );
 }
