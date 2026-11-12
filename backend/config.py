@@ -48,6 +48,29 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001").st
 EMBED_TIMEOUT_SECONDS = int(os.getenv("EMBED_TIMEOUT_SECONDS", "20"))
 
 
+# ---- Video audit (Gemini video + audio understanding) ---------------------------
+# The clip is sent straight to Gemini, which reads frames, on-screen text and audio itself,
+# so the server needs no FFmpeg and no local model (fits Render's 512 MB tier).
+GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com").strip().rstrip("/")
+VIDEO_MODELS = _csv("VIDEO_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash")
+VIDEO_MAX_SECONDS = float(os.getenv("VIDEO_MAX_SECONDS", "20"))
+VIDEO_MIN_SECONDS = float(os.getenv("VIDEO_MIN_SECONDS", "1"))
+VIDEO_MAX_BYTES = int(os.getenv("VIDEO_MAX_BYTES", str(40 * 1024 * 1024)))
+# Up to this size the clip goes inline in the request; larger clips are streamed from disk
+# to Gemini's Files API, so they are never held in memory.
+VIDEO_INLINE_MAX_BYTES = int(os.getenv("VIDEO_INLINE_MAX_BYTES", str(8 * 1024 * 1024)))
+VIDEO_TIMEOUT_SECONDS = int(os.getenv("VIDEO_TIMEOUT_SECONDS", "120"))
+VIDEO_MAX_OUTPUT_TOKENS = int(os.getenv("VIDEO_MAX_OUTPUT_TOKENS", "8192"))
+VIDEO_POLICY_CHARS = int(os.getenv("VIDEO_POLICY_CHARS", "60000"))
+
+
+def video_models() -> list:
+    """Gemini models tried in order for a video audit (needs GOOGLE_API_KEY)."""
+    if not GOOGLE_API_KEY:
+        return []
+    return list(dict.fromkeys(VIDEO_MODELS + [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
+
+
 def llm_chain() -> list:
     """Ordered (provider, model) pairs that have an API key configured."""
     chain = []

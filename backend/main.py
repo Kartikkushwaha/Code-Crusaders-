@@ -5,11 +5,13 @@ Render start:  uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
 """
 import io
 import logging
+import os
+import tempfile
 import threading
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -17,11 +19,12 @@ import analytics
 import audit_service
 import config
 import database
+import video_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("publivra.api")
 
-VERSION = "2.3.0"  # 2.3: per-section chart data (Tone, Logo, Data & Privacy, Others) before/after publication
+VERSION = "2.4.0"  # 2.4: video audit (Gemini video + audio understanding, timeline findings)
 
 
 @asynccontextmanager
@@ -137,7 +140,13 @@ def health():
             "embedding_model": config.EMBEDDING_MODEL if config.GOOGLE_API_KEY else None,
         },
         "database": database.status(),
-        "features": ["user-policy-knowledge", "policy-line-refs", "full-policy-review", "section-analytics"],
+        "video": {
+            "configured": bool(config.video_models()),
+            "models": config.video_models(),
+            "max_seconds": config.VIDEO_MAX_SECONDS,
+            "max_mb": config.VIDEO_MAX_BYTES // (1024 * 1024),
+        },
+        "features": ["user-policy-knowledge", "policy-line-refs", "full-policy-review", "section-analytics", "video-audit"],
     }
 
 
@@ -216,6 +225,68 @@ def brand_audit(document_file: UploadFile = File(None), file: UploadFile = File(
         "recommendations": result["recommendations"],
         "audit_id": result["audit_id"],
     }
+
+
+@app.post("/api/video-audit", status_code=202)
+def start_video_audit(
+    video: UploadFile = File(..., description="MP4 / MOV / WebM clip, up to 20 seconds"),
+    policy_text: str = Form("", description="The policy text (as extracted / OCR-read by the dashboard)"),
+    policy_name: str = Form(""),
+    title: str = Form(""),
+    tone_profile: str = Form("Professional"),
+    company: str = Form(""),
+    duration: str = Form("", description="Clip length in seconds as measured by the browser (fallback only)"),
+):
+    """Video API: validate the file, create a job and return at once. Poll GET /api/video-audit/{job_id}."""
+    if not config.video_models():
+        raise HTTPException(status_code=503, detail="Video audit needs a Gemini key. Set GOOGLE_API_KEY on the server.")
+    if video_service.queue_size() >= 3:
+        raise HTTPException(status_code=429, detail="Several videos are already being analysed. Please retry in a minute.")
+
+    # Stream the upload to a temp file (1 MB at a time), so the clip is never held in memory.
+    fd, path = tempfile.mkstemp(prefix="publivra-video-", suffix=".bin")
+    try:
+        written = 0
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = video.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > config.VIDEO_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail=f"The video is larger than the {config.VIDEO_MAX_BYTES // (1024 * 1024)} MB limit.")
+                out.write(chunk)
+        if not written:
+            raise HTTPException(status_code=400, detail="The uploaded video is empty.")
+        # Fail fast on the wrong format or length, before a job is created.
+        video_service.sniff_mime(path)
+        video_service.check_duration(path, duration)
+    except video_service.VideoError as exc:
+        os.remove(path)
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    except BaseException:
+        if os.path.exists(path):
+            os.remove(path)
+        raise
+
+    return video_service.create_job(
+        path,
+        title=(title or video.filename or "Untitled video")[:300],
+        policy_text=policy_text[: config.MAX_POLICY_CHARS],
+        policy_name=policy_name[:200],
+        tone_profile=tone_profile,
+        company=company.strip(),
+        client_duration=duration,
+    )
+
+
+@app.get("/api/video-audit/{job_id}")
+def video_audit_status(job_id: str):
+    """Progress of a video audit; `result` is filled in once `status` is "done"."""
+    job = video_service.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="This video analysis is no longer available (the server restarted). Please run it again.")
+    return job
 
 
 @app.post("/api/publications")
