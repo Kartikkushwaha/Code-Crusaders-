@@ -37,6 +37,8 @@ Alternatively, use `render.yaml` in the repo root (Blueprint deploy).
 | POST | `/api/audit` | **Main endpoint.** JSON `{text, title, source, policy_rules, policy_document:{name,text}, tone_profile}` → findings with VERIFIED / UNVERIFIED / CONTRADICTED, severity, source, rewrite, risk, `audit_id` |
 | POST | `/api/audit-document` | Original multipart PDF endpoint (`document_file` or `file`, optional `policy_file`). Same response shape as before |
 | POST | `/api/brand-audit` | Original brand-tone endpoint (multipart PDF) |
+| POST | `/api/video-audit` | **Video check.** Multipart `video` (MP4 / MOV / WebM, ≤ 20 s, ≤ 40 MB) + `policy_text`, `policy_name`, `title`, `tone_profile`, `company`, `duration` → `202 {job_id}` |
+| GET | `/api/video-audit/{job_id}` | Job progress (`stage`, `progress`, `message`) and, when `status` is `done`, the result |
 | POST | `/api/publications` | Log a publish or override |
 | POST | `/api/publications/{id}/verify` | Record the human sign-off |
 | GET | `/api/publications`, `/api/audits` | History from Neon |
@@ -76,3 +78,34 @@ Columns are added automatically on boot and older rows are backfilled from their
 - `.dict()` is replaced by Pydantic v2 `model_dump()`. The duplicate `/api/audit-document` route is removed.
 - The `.pyc` cache files are not included because they are build output.
 - `compliance_checker.py` moved to `tools/` and uses the shared engine.
+
+## Video audit (v2.4)
+
+A short clip is checked against the same policy as the text and image checks.
+
+1. **Video API** (`main.py`): the upload is streamed to a temp file (1 MB at a time), the container type is read from the file's first bytes, and the length is read from the MP4/MOV header in pure Python (`video_service.probe_duration`). Clips over `VIDEO_MAX_SECONDS` (20) or `VIDEO_MAX_BYTES` (40 MB) are refused before a job is created.
+2. **Job**: the endpoint answers at once with a `job_id`; the work runs in a background thread and the dashboard polls for progress. One video is analysed at a time.
+3. **Multimodal AI engine**: the clip goes straight to Gemini, which reads the frames, the on-screen text and the audio track itself. Clips up to `VIDEO_INLINE_MAX_BYTES` (8 MB) are sent inline; larger ones are streamed from disk to Gemini's Files API and deleted afterwards. Models are tried in the order of `VIDEO_MODELS` (default `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`), then `GEMINI_MODEL`.
+4. **Aggregator** (`video_service.aggregate`): timestamps are clamped to the clip, duplicate events are merged, and every citation is matched against the numbered policy lines (`policy_index.find_ref`). A CONTRADICTED verdict with no matching policy line is downgraded to UNVERIFIED unless it is a universal safety rule (personal data, absolute guarantees).
+5. **Result**: summary, tone, transcript, on-screen text, colours, and timeline findings (`start`, `end`, `aspect`, `verdict`, `severity`, `policy_ref`, `recommendation`), plus risk level and score. It is saved to `document_compliance` with `source = "video"`, so it appears in History and in the Insights charts.
+
+**Memory:** there is no FFmpeg, no local model and no new dependency (Gemini is called with the standard library). **`GOOGLE_API_KEY` is required** for this feature; Groq models cannot read video.
+
+```bash
+python -m tests.test_video      # offline: a local fake Gemini server covers inline, Files API, fallback and jobs
+```
+
+### Backup engine (v2.5) - when Gemini answers "high demand"
+
+Gemini's free tier is often overloaded. The video audit no longer depends on it:
+
+1. Gemini models are tried once each (`VIDEO_MODELS`, now including `gemini-3.5-flash-lite`), 60 s per call, 75 s in total.
+2. If none answers, the **Groq backup engine** takes over (needs only `GROQ_API_KEY`):
+   - **Speech:** the clip is streamed to Whisper on Groq (`whisper-large-v3-turbo`), which returns the transcript with timestamps.
+   - **Frames:** the dashboard sends 12 still frames of the clip as 3 small JPEG contact sheets (made in the browser, so the server still needs no FFmpeg). A Groq vision model (`GROQ_VISION_MODELS`) checks them with the transcript against the policy.
+   - The result has the same shape; `engine` is `"groq"` and `engine_notes` says what was not covered.
+3. If the backup also fails, Gemini gets one more pass before the job ends with an error.
+
+**Limits of the backup:** it sees 12 frames, not the whole video, and it cannot hear music or sound effects - only speech. Long policies are cut to `VIDEO_BACKUP_POLICY_CHARS` (12,000) to fit Groq's free-tier token budget.
+
+`VIDEO_ENGINE=groq` skips Gemini completely (fastest when Gemini is down all day); `VIDEO_ENGINE=gemini` turns the backup off.

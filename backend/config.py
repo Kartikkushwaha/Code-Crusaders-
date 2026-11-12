@@ -48,6 +48,48 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001").st
 EMBED_TIMEOUT_SECONDS = int(os.getenv("EMBED_TIMEOUT_SECONDS", "20"))
 
 
+# ---- Video audit (Gemini video + audio understanding) ---------------------------
+# The clip is sent straight to Gemini, which reads frames, on-screen text and audio itself,
+# so the server needs no FFmpeg and no local model (fits Render's 512 MB tier).
+GEMINI_API_BASE = os.getenv("GEMINI_API_BASE", "https://generativelanguage.googleapis.com").strip().rstrip("/")
+VIDEO_MODELS = _csv("VIDEO_MODELS", "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite")
+VIDEO_MAX_SECONDS = float(os.getenv("VIDEO_MAX_SECONDS", "20"))
+VIDEO_MIN_SECONDS = float(os.getenv("VIDEO_MIN_SECONDS", "1"))
+VIDEO_MAX_BYTES = int(os.getenv("VIDEO_MAX_BYTES", str(40 * 1024 * 1024)))
+# Up to this size the clip goes inline in the request; larger clips are streamed from disk
+# to Gemini's Files API, so they are never held in memory.
+VIDEO_INLINE_MAX_BYTES = int(os.getenv("VIDEO_INLINE_MAX_BYTES", str(8 * 1024 * 1024)))
+VIDEO_TIMEOUT_SECONDS = int(os.getenv("VIDEO_TIMEOUT_SECONDS", "60"))
+# Gemini is given this long in total; after that the backup engine takes over.
+VIDEO_GEMINI_BUDGET_SECONDS = int(os.getenv("VIDEO_GEMINI_BUDGET_SECONDS", "75"))
+
+# Backup engine for when Gemini is overloaded ("high demand") or times out: Groq reads still
+# frames of the clip (sent by the dashboard) and Whisper on Groq transcribes the speech.
+#   VIDEO_ENGINE=auto   Gemini first, Groq backup (default)
+#   VIDEO_ENGINE=groq   skip Gemini, always use the backup engine
+#   VIDEO_ENGINE=gemini Gemini only
+VIDEO_ENGINE = os.getenv("VIDEO_ENGINE", "auto").strip().lower()
+GROQ_API_BASE = os.getenv("GROQ_API_BASE", "https://api.groq.com").strip().rstrip("/")
+GROQ_VISION_MODELS = _csv("GROQ_VISION_MODELS", "qwen/qwen3.6-27b,meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_TRANSCRIBE_MODEL = os.getenv("GROQ_TRANSCRIBE_MODEL", "whisper-large-v3-turbo").strip()
+GROQ_TRANSCRIBE_MAX_BYTES = 24 * 1024 * 1024  # Groq accepts audio / video uploads up to 25 MB
+VIDEO_BACKUP_POLICY_CHARS = int(os.getenv("VIDEO_BACKUP_POLICY_CHARS", "12000"))  # Groq free-tier token budget
+VIDEO_MAX_OUTPUT_TOKENS = int(os.getenv("VIDEO_MAX_OUTPUT_TOKENS", "8192"))
+VIDEO_POLICY_CHARS = int(os.getenv("VIDEO_POLICY_CHARS", "60000"))
+
+
+def video_models() -> list:
+    """Gemini models tried in order for a video audit (needs GOOGLE_API_KEY)."""
+    if not GOOGLE_API_KEY or VIDEO_ENGINE == "groq":
+        return []
+    return list(dict.fromkeys(VIDEO_MODELS + [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
+
+
+def video_backup_enabled() -> bool:
+    """The Groq backup engine (frames + speech transcript) needs only GROQ_API_KEY."""
+    return bool(GROQ_API_KEY) and VIDEO_ENGINE != "gemini"
+
+
 def llm_chain() -> list:
     """Ordered (provider, model) pairs that have an API key configured."""
     chain = []
