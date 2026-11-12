@@ -69,7 +69,7 @@ function Card({ s }) {
           </div>
           <div className="text-slate-400">
             {s.ai ? `${s.ai.model}${s.ai.auditId ? ` · Neon audit #${s.ai.auditId}` : ""}` : "AI deep audit not run"}
-            {s.visual?.images?.length ? ` · ${s.visual.images.length} image(s) audited` : ""}
+            {s.visual?.images?.length ? ` · ${s.visual.images.length} image(s)` : ""}{s.visual?.videos?.length ? ` · ${s.visual.videos.length} video(s)` : ""}
           </div>
         </Track>
         <Track icon={BadgeCheck} title="2 · Publication & sign-off">

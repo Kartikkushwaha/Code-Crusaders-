@@ -1,12 +1,12 @@
 import { useEffect } from "react";
-import { BarChart3, ClipboardCheck, FilePenLine, History, Inbox, LayoutDashboard, Scale, ShieldCheck, X } from "lucide-react";
-import { RoleSwitcher } from "./TopBar.jsx";
+import { BarChart3, Building2, ClipboardCheck, FilePenLine, History, Inbox, LayoutDashboard, LogOut, Repeat, Scale, ShieldCheck, X } from "lucide-react";
+import { RoleBadge } from "./TopBar.jsx";
 
 export const NAV = {
   creator: [
     { id: "workspace", label: "Check content", hint: "Upload content, images & policy, fix issues", icon: LayoutDashboard },
     { id: "verification", label: "Sign-off", hint: "Final human checklist after approval", icon: ClipboardCheck },
-    { id: "insights", label: "Insights", hint: "Common graph of risk by violation type", icon: BarChart3 },
+    { id: "insights", label: "Insights", hint: "Common graph + company graph", icon: BarChart3 },
     { id: "history", label: "History & sign-off", hint: "AI audits, approvals and sign-offs", icon: History },
   ],
   manager: [
@@ -16,12 +16,13 @@ export const NAV = {
   ],
   legal: [
     { id: "legal", label: "Legal review", hint: "Submissions forwarded by the manager", icon: Scale },
+    { id: "insights", label: "Insights", hint: "Common graph + company graph", icon: BarChart3 },
     { id: "history", label: "History & sign-off", hint: "AI audits, approvals and sign-offs", icon: History },
   ],
 };
 export const PANEL_TITLE = { creator: "Creator panel", manager: "Manager panel", legal: "Legal approver panel" };
 
-export default function Drawer({ open, onClose, view, onNavigate, badges, onNewDocument, policyName, role, onRole, roleBadges }) {
+export default function Drawer({ open, onClose, view, onNavigate, badges, onNewDocument, policyName, role, session, onSwitchAccount, onLogout }) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => e.key === "Escape" && onClose();
@@ -61,8 +62,23 @@ export default function Drawer({ open, onClose, view, onNavigate, badges, onNewD
         </div>
 
         <div className="px-3 pt-4">
-          <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">Panel</div>
-          <RoleSwitcher role={role} onRole={onRole} badges={roleBadges} full />
+          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+              <Building2 className="h-3 w-3" /> {session.company}
+            </div>
+            <div className="mt-1 truncate text-xs text-slate-200">{session.email}</div>
+            <div className="mt-1.5 flex items-center justify-between gap-2">
+              <RoleBadge role={role} />
+              <span className="flex gap-1">
+                <button onClick={onSwitchAccount} title="Switch account" aria-label="Switch account" className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-white">
+                  <Repeat className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={onLogout} title="Logout" aria-label="Logout" className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-rose-300">
+                  <LogOut className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            </div>
+          </div>
         </div>
 
         {role === "creator" && (

@@ -214,7 +214,11 @@ function DecisionBox({ role, sub, toast }) {
 
 export function SubmissionDetail({ sub, role, toast }) {
   const r = RISK_STYLE[sub.risk.level];
-  const visualFindings = (sub.visual?.images || []).flatMap((i) => [...i.findings, ...(i.adFindings || [])].map((f) => ({ ...f, image: i.name })));
+  const visualFindings = [
+    ...(sub.visual?.images || []).flatMap((i) => [...i.findings, ...(i.adFindings || [])].map((f) => ({ ...f, image: i.name }))),
+    ...(sub.visual?.videos || []).flatMap((v) => v.findings.map((f) => ({ ...f, image: v.name }))),
+  ];
+  const mediaCount = (sub.visual?.images?.length || 0) + (sub.visual?.videos?.length || 0);
   const canDecide = (role === "manager" && sub.status === "pending_manager") || (role === "legal" && sub.status === "pending_legal");
   return (
     <div className="space-y-3">
@@ -304,11 +308,26 @@ export function SubmissionDetail({ sub, role, toast }) {
           <p className="text-xs text-slate-500">No fixes were applied in the editor.</p>
         )}
       </Section>
-      <Section icon={ImageIcon} title="Visual audit (logo, colours, text in images)" count={sub.visual?.images?.length || 0} defaultOpen={!!sub.visual?.images?.length}>
-        {sub.visual?.images?.length ? (
+      <Section icon={ImageIcon} title="Visual audit (images & video: logo, colours, captions)" count={mediaCount} defaultOpen={mediaCount > 0}>
+        {mediaCount ? (
           <div className="space-y-3">
             <div className="flex flex-wrap gap-2">
-              {sub.visual.images.map((im) => (
+              {(sub.visual.videos || []).map((v) => (
+                <div key={v.name} className="w-32 text-center">
+                  <div className="relative">
+                    {v.poster ? (
+                      <img src={v.poster} alt={v.name} className="h-20 w-32 rounded-lg border border-fuchsia-500/50 object-cover" />
+                    ) : (
+                      <div className="h-20 w-32 rounded-lg border border-fuchsia-500/50 bg-slate-900" />
+                    )}
+                    <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white">
+                      {String(Math.floor(v.duration / 60)).padStart(2, "0")}:{String(Math.floor(v.duration % 60)).padStart(2, "0")}
+                    </span>
+                  </div>
+                  <div className="mt-1 truncate text-[10px] text-fuchsia-200">{v.name}</div>
+                </div>
+              ))}
+              {(sub.visual.images || []).map((im) => (
                 <div key={im.name} className="w-24 text-center">
                   {im.thumb ? (
                     <img src={im.thumb} alt={im.name} className="h-20 w-24 rounded-lg border border-slate-700 bg-white object-contain" />

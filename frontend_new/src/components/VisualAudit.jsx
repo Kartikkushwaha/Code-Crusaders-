@@ -3,6 +3,7 @@ import { ChevronDown, ImagePlus, LoaderCircle, Palette, Plus, RotateCcw, ScanSea
 import { Button, VerdictBadge } from "./ui.jsx";
 import { effectiveKit, loadSavedKit, normHex, saveKit } from "../lib/brandKit.js";
 import { auditImage, fileToDataUrl, loadImage, logoDataUrl } from "../lib/visualAudit.js";
+import VideoAudit from "./VideoAudit.jsx";
 
 const MAX_IMAGES = 6;
 const GROUPS = [
@@ -287,7 +288,7 @@ function BrandKit({ kit, saved, setSaved, toast }) {
  * Improvement 1 - images & graphics audit in the Creator panel.
  * images: audit results (lifted to App so they count towards risk and go to the manager).
  */
-export default function VisualAudit({ policyText, images, onImagesChange, onAuditAdText, toast, log }) {
+export default function VisualAudit({ policyText, images, onImagesChange, videos = [], onVideosChange = () => {}, onAuditAdText, toast, log }) {
   const [saved, setSaved] = useState(loadSavedKit);
   const kit = useMemo(() => effectiveKit(policyText, saved), [policyText, saved]);
   const files = useRef(new Map());
@@ -339,6 +340,25 @@ export default function VisualAudit({ policyText, images, onImagesChange, onAudi
     if (take.length) runAll(take);
   };
 
+  // "Load Sample Ad Video": fill any empty parts of the brand kit with the sample brand, never overwrite yours
+  const ensureSampleKit = async () => {
+    const patch = {};
+    if (!kit.logo) {
+      const img = await loadImage("/sample-brand-logo.png");
+      patch.logo = logoDataUrl(img);
+      patch.logoName = "sample-brand-logo.png";
+    }
+    if (!kit.brandName) patch.brandName = "PUBLIVRA AI";
+    if (!kit.motto) patch.motto = "Publish with confidence.";
+    if (!kit.colors.length) patch.colors = [{ hex: "#4f46e5", name: "Indigo" }, { hex: "#eef2ff", name: "Mist" }];
+    if (!Object.keys(patch).length) return kit;
+    const next = { ...saved, ...patch };
+    setSaved(next);
+    saveKit(next);
+    toast("Sample brand kit added where yours was empty (logo, colours, brand name, motto). Edit it any time.", "success");
+    return { ...kit, ...patch };
+  };
+
   const reRunAll = () => runAll(latest.current.map((i) => files.current.get(i.name)).filter(Boolean));
 
   const totals = images.reduce(
@@ -350,6 +370,7 @@ export default function VisualAudit({ policyText, images, onImagesChange, onAudi
   );
 
   return (
+    <>
     <section className="rounded-2xl border border-slate-800 bg-slate-900/60" aria-label="Images and graphics audit">
       <div className="flex flex-wrap items-center gap-3 p-4">
         <button onClick={() => setOpen((o) => !o)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
@@ -439,5 +460,7 @@ export default function VisualAudit({ policyText, images, onImagesChange, onAudi
         </div>
       )}
     </section>
+    <VideoAudit kit={kit} videos={videos} onVideosChange={onVideosChange} onAuditAdText={onAuditAdText} ensureSampleKit={ensureSampleKit} toast={toast} log={log} />
+    </>
   );
 }

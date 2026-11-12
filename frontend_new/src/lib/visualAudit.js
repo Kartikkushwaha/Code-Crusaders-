@@ -298,8 +298,8 @@ function bestNcc(img, iw, ih, tpl, tw, th) {
  * Find the reference logo inside the image.
  * Returns { score 0-1, aspect (1 = not stretched), inverted, box, colourDelta, logoColour, foundColour }.
  */
-export function matchLogo(imageImg, logoImg) {
-  const base = toCanvas(imageImg, 220);
+export function matchLogo(imageImg, logoImg, baseSide = 220) {
+  const base = toCanvas(imageImg, baseSide);
   const iw = base.width;
   const ih = base.height;
   const ig = grayOf(base);
@@ -307,7 +307,10 @@ export function matchLogo(imageImg, logoImg) {
   const lh0 = logoImg.naturalHeight || logoImg.height;
   const ratio = lh0 / lw0;
   let best = { score: 0 };
-  const fractions = [0.1, 0.14, 0.2, 0.27, 0.35, 0.45, 0.6, 0.75, 0.9, 1];
+  // logo width as a share of the image: fine geometric steps so small watermarks are matched at their true size
+  const fractions = [];
+  for (let s = 0.08; s < 1; s *= 1.16) fractions.push(s);
+  fractions.push(1);
   for (const aspect of [1, 0.8, 1.25]) {
     for (const f of fractions) {
       const tw = Math.round(iw * f);
@@ -316,7 +319,7 @@ export function matchLogo(imageImg, logoImg) {
       const tpl = grayOf(toCanvas(logoImg, 0, { w: tw, h: th }));
       const r = bestNcc(ig, iw, ih, tpl, tw, th);
       // stretched variants must clearly beat the true aspect ratio to count
-      const adj = aspect === 1 ? r.score : r.score - 0.04;
+      const adj = aspect === 1 ? r.score : r.score - 0.1;
       if (adj > (best.adj ?? -1)) best = { ...r, adj, tw, th, aspect };
     }
   }

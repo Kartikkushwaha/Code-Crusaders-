@@ -159,9 +159,11 @@ Use `frontend` as the root directory. Vite is detected automatically (`vercel.js
 
 ## Round 3
 
-**Three panels, one switch.** Use the Creator / Manager / Legal switch in the top bar (or the menu).
-All three panels share the same approval data, saved in the browser (localStorage), so you can switch
-roles and follow one submission through the whole flow.
+**Enterprise sign-in.** Step 1: parent company (e.g. *Publivra Corp* → `@publivra.com`). Step 2: pick a role
+(Creator, Manager or Legal Approver) and sign in with a company ID ending in that domain - or use **Autofill demo ID**.
+The top bar shows the company, ID and role badge; **Switch account** / **Logout** are in the account menu.
+Each company only sees its own submissions. The creator's open document stays in place while you switch roles.
+(Demo sign-in: no password; data is kept in the browser.)
 
 - **Creator panel** - check text, PDFs and images. Publishing stays **locked** until the content is approved.
   "Send to Manager" sends the content, the fixes applied, the visual audit and the AI score.
@@ -179,6 +181,14 @@ roles and follow one submission through the whole flow.
 - *Text inside the image* (OCR) - brand name and motto must be 100% identical to the policy; the rest of the ad text
   goes through the rule checks and the AI deep audit (Contradicted / Unverified / Verified).
 Image findings count towards the risk score, go to the manager, and feed the **Logo** bars in Insights.
+
+**Upload Video (Creator panel).** Upload an MP4 / MOV / WEBM or click **Load Sample Ad Video**. Frames are sampled
+across the whole video and each is checked for the brand watermark (logo), brand colours and on-screen captions
+(brand name & motto must be identical; other captions go to the AI deep audit). Every finding has a timestamp -
+click it to jump the player there. Spoken voiceover is not transcribed yet, so it is flagged for a reviewer.
+Video findings count towards the risk score and are sent to the Manager / Legal approver.
+
+**Insights** - the same dashboard (Common graph + Company graph, repeated-issues popups) in all three panels.
 
 > Note: approvals are stored in the browser for this demo, so all roles must use the same browser.
 > A shared database table and logins are needed for reviewers on different devices.

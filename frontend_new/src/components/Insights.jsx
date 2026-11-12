@@ -420,10 +420,11 @@ function ChartCard({ title, subtitle, icon: Icon, company, needsCompany }) {
  * Improvement 2 - analytics.
  * Common graph: Creator & Manager panels. Company graph: Manager panel only.
  */
-export default function Insights({ role, company, onCompanyChange }) {
-  const [draft, setDraft] = useState(company);
-  useEffect(() => setDraft(company), [company]);
-  const isManager = role === "manager";
+/**
+ * Improvement 2 - analytics. The same dashboard in the Creator, Manager and Legal approver panels:
+ * the common graph (all companies) and the company graph (the signed-in parent company).
+ */
+export default function Insights({ company }) {
   return (
     <div className="mx-auto max-w-6xl space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -431,41 +432,20 @@ export default function Insights({ role, company, onCompanyChange }) {
           <h1 className="flex items-center gap-2 text-xl font-bold text-white">
             <BarChart3 className="h-5 w-5 text-indigo-400" /> Insights
           </h1>
-          <p className="mt-1 text-xs text-slate-400">
-            Average risk per violation type, before and after publishing{isManager ? ", across all checks and for your company" : ""}.
-          </p>
+          <p className="mt-1 text-xs text-slate-400">Average risk per violation type, before and after publishing, across all checks and for your company.</p>
         </div>
-        <form
-          className="flex items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            onCompanyChange(draft.trim());
-          }}
-        >
-          <label className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-1.5 text-xs text-slate-400">
-            <Building2 className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Company</span>
-            <input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onBlur={() => draft.trim() !== company && onCompanyChange(draft.trim())}
-              placeholder="e.g. Proclinical"
-              aria-label="Company"
-              className="w-32 bg-transparent text-slate-100 placeholder:text-slate-600 focus:outline-none sm:w-40"
-            />
-          </label>
-        </form>
+        <span className="inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-1.5 text-xs text-slate-300">
+          <Building2 className="h-3.5 w-3.5 text-slate-400" /> {company}
+        </span>
       </div>
       <ChartCard title="Common graph" subtitle="All checks across every company." icon={Globe} company="" />
-      {isManager && (
-        <ChartCard
-          title={company ? `Company graph - ${company}` : "Company graph"}
-          subtitle="Same graph, only for checks and publications tagged with your company. Visible to managers only."
-          icon={Building2}
-          company={company}
-          needsCompany
-        />
-      )}
+      <ChartCard
+        title={`Company graph - ${company}`}
+        subtitle="Same graph, only for checks and publications from your company."
+        icon={Building2}
+        company={company}
+        needsCompany
+      />
     </div>
   );
 }

@@ -179,8 +179,10 @@ export function SendModal({ open, onClose, onConfirm, summary, defaultName, resu
           <Row ok={!!ai && !aiStale} warn>
             {ai ? `AI deep audit by ${ai.model}${aiStale ? " - out of date, the content changed after it ran" : ""}` : "AI deep audit not run - the manager will see this"}
           </Row>
-          <Row ok={visual.images > 0 && visual.contradicted === 0} warn>
-            {visual.images ? `Visual audit: ${visual.images} image(s), ${visual.contradicted} contradicted, ${visual.unverified} unverified` : "No images audited"}
+          <Row ok={visual.images + (visual.videos || 0) > 0 && visual.contradicted === 0} warn>
+            {visual.images || visual.videos
+              ? `Visual audit: ${[visual.images && `${visual.images} image(s)`, visual.videos && `${visual.videos} video(s)`].filter(Boolean).join(" + ")}, ${visual.contradicted} contradicted, ${visual.unverified} unverified`
+              : "No images or videos audited"}
           </Row>
           <Row ok warn>
             {improvements} fix{improvements === 1 ? "" : "es"} applied{overrides ? ` · ${overrides} finding(s) overridden with a reason` : ""}

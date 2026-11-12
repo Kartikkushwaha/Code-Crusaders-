@@ -64,7 +64,11 @@ function write(next) {
         ...data,
         submissions: data.submissions
           .slice(0, Math.max(5, data.submissions.length - 10))
-          .map((s, i) => (i < 3 || !s.visual ? s : { ...s, visual: { ...s.visual, images: s.visual.images.map(({ thumb, ...img }) => img) } })),
+          .map((s, i) =>
+            i < 3 || !s.visual
+              ? s
+              : { ...s, visual: { ...s.visual, images: (s.visual.images || []).map(({ thumb, ...img }) => img), videos: (s.visual.videos || []).map(({ poster, ...v }) => v) } },
+          ),
       };
     }
   }

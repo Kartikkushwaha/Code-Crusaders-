@@ -21,7 +21,10 @@ import VisualAudit from "./components/VisualAudit.jsx";
 import { ApprovalActions, ApprovalNotice, SendModal } from "./components/ApprovalFlow.jsx";
 import ReviewPanel from "./components/ReviewPanel.jsx";
 import { SignoffLog } from "./components/SignoffLog.jsx";
-import { loadName, loadRole, markPublished, markSeen, markSignedOff, saveName, saveRole, submitToManager, useWorkflow } from "./lib/workflow.js";
+import { loadName, markPublished, markSeen, markSignedOff, saveName, submitToManager, useWorkflow } from "./lib/workflow.js";
+import LoginScreen from "./components/LoginScreen.jsx";
+import NetworkNotice from "./components/NetworkNotice.jsx";
+import { clearSession, lastCompany, loadSession, saveSession } from "./lib/session.js";
 
 import { derivePolicy, groupFindings } from "./lib/insights.js";
 import { analyzeDocument, computeRisk, policyToText, tidy as tidySentence } from "./lib/policyEngine.js";
@@ -46,42 +49,62 @@ const nextId = (p) => `${p}-${Date.now().toString(36)}-${(uid++).toString(36)}`;
 export default function App() {
   // navigation
   const [drawerOpen, setDrawerOpen] = useState(false);
-  // Round 3: three panels share one workflow store (localStorage). Each panel keeps its own page.
-  const [role, setRoleState] = useState(loadRole);
+  // Enterprise sign-in: parent company (tenant) -> child role. The role decides the panel.
+  const [session, setSession] = useState(loadSession);
+  const [loginPrefill, setLoginPrefill] = useState(() => lastCompany());
+  const role = session?.role || "creator";
   const [views, setViews] = useState({ creator: "workspace", manager: "approvals", legal: "legal" });
   const view = views[role];
   const setView = useCallback((v) => setViews((vs) => ({ ...vs, [role]: v })), [role]);
   const setCreatorView = useCallback((v) => setViews((vs) => ({ ...vs, creator: v })), []);
-  const setRole = useCallback((r) => {
-    setRoleState(r);
-    saveRole(r);
+  const onLogin = useCallback((s) => {
+    saveSession(s);
+    if (!loadName(s.role)) saveName(s.role, s.email);
+    setSession(s);
     setDrawerOpen(false);
   }, []);
-  const workflow = useWorkflow();
+  const switchAccount = useCallback(() => {
+    // keep the company, pick another role - the creator's open document stays in place
+    setLoginPrefill({ company: session?.company, domain: session?.domain, role: session?.role });
+    clearSession();
+    setSession(null);
+    setDrawerOpen(false);
+  }, [session]);
+  const logout = useCallback(() => {
+    clearSession();
+    setLoginPrefill(null);
+    setSession(null);
+    setDrawerOpen(false);
+  }, []);
+  const allWorkflow = useWorkflow();
+  // each company (tenant) only sees its own submissions
+  const tenantOf = (c) => String(c || "").trim().toLowerCase();
+  const workflow = useMemo(
+    () => ({ ...allWorkflow, submissions: allWorkflow.submissions.filter((s) => tenantOf(s.company) === tenantOf(session?.company)) }),
+    [allWorkflow, session?.company],
+  );
+  const pendingFor = useCallback(
+    (c) => {
+      const subs = allWorkflow.submissions.filter((s) => tenantOf(s.company) === tenantOf(c));
+      return {
+        manager: subs.filter((s) => s.status === "pending_manager").length,
+        legal: subs.filter((s) => s.status === "pending_legal").length,
+        creator: subs.filter((s) => !s.seenByCreator).length,
+      };
+    },
+    [allWorkflow],
+  );
   const [currentSubId, setCurrentSubId] = useState(null);
   const currentSub = workflow.submissions.find((s) => s.id === currentSubId) || null;
   const [sendOpen, setSendOpen] = useState(false);
   // Improvement 1: audited images (logo, colours, text in image) for the current document
   const [visualImages, setVisualImages] = useState([]);
+  const [videos, setVideos] = useState([]);
   // fixes the creator applied, sent to the manager with the submission
   const [improvements, setImprovements] = useState([]);
   const addImprovement = useCallback((t) => setImprovements((l) => [...l, t].slice(-80)), []);
-  // Company / brand name: tags every audit and publication so managers can filter the charts.
-  const [company, setCompanyState] = useState(() => {
-    try {
-      return localStorage.getItem("publivra.company") || "";
-    } catch {
-      return "";
-    }
-  });
-  const setCompany = useCallback((v) => {
-    setCompanyState(v);
-    try {
-      localStorage.setItem("publivra.company", v);
-    } catch {
-      /* storage blocked */
-    }
-  }, []);
+  // The signed-in parent company tags every audit, publication and submission.
+  const company = session?.company || "";
 
   // document
   const editorRef = useRef(null);
@@ -218,7 +241,10 @@ export default function App() {
     return { ...analysis, findings: [...ruleFindings, ...aiOnly] };
   }, [analysis, ai, text]);
 
-  const visualFindings = useMemo(() => visualImages.flatMap((i) => [...i.findings, ...(i.adFindings || [])]), [visualImages]);
+  const visualFindings = useMemo(
+    () => [...visualImages.flatMap((i) => [...i.findings, ...(i.adFindings || [])]), ...videos.flatMap((v) => v.findings)],
+    [visualImages, videos],
+  );
   const risk = useMemo(() => (merged ? computeRisk([...merged.findings, ...visualFindings], merged.tone, dismissed) : null), [merged, visualFindings, dismissed]);
 
   const issueGroups = useMemo(() => (merged ? groupFindings(merged.findings, dismissed) : []), [merged, dismissed]);
@@ -304,6 +330,7 @@ export default function App() {
       lastLevel.current = null;
       setActivePubId(null);
       setVisualImages([]);
+      setVideos([]);
       setImprovements([]);
       setCurrentSubId(null);
       setCreatorView("workspace");
@@ -357,6 +384,7 @@ export default function App() {
     setAi({ status: "idle", result: null, error: null, textAtRun: "" });
     setActivePubId(null);
     setVisualImages([]);
+    setVideos([]);
     setImprovements([]);
     setCurrentSubId(null);
     setCreatorView("workspace");
@@ -451,6 +479,7 @@ export default function App() {
         aiStale: !!ai.result && text !== ai.textAtRun,
         visual: {
           images: visualImages.length,
+          videos: videos.length,
           contradicted: visualFindings.filter((f) => f.verdict === "CONTRADICTED" && !dismissed[f.id]).length,
           unverified: visualFindings.filter((f) => f.verdict === "UNVERIFIED" && !dismissed[f.id]).length,
         },
@@ -483,8 +512,14 @@ export default function App() {
       overrides: allFindings
         .filter((f) => dismissed[f.id])
         .map((f) => ({ verdict: f.verdict, match: String(f.match || "").slice(0, 120), reason: dismissed[f.id] })),
-      visual: visualImages.length
+      visual: visualImages.length || videos.length
         ? {
+            videos: videos.map((v) => ({
+              name: v.name,
+              duration: v.duration,
+              poster: v.poster,
+              findings: v.findings.filter((f) => !dismissed[f.id]).map(({ id, time, verdict, severity, category, match, explanation, recommendation }) => ({ id, time, verdict, severity, category, match, explanation, recommendation })),
+            })),
             images: visualImages.map((i) => ({
               name: i.name,
               thumb: i.thumb,
@@ -614,7 +649,10 @@ export default function App() {
   const navBadges = { verification: pendingCount, approvals: roleBadges.manager, legal: roleBadges.legal, workspace: roleBadges.creator };
 
   return (
-    <div className="min-h-full">
+    <>
+    <NetworkNotice />
+    {!session && <LoginScreen key={loginPrefill?.company || "new"} initial={loginPrefill} onLogin={onLogin} pendingFor={pendingFor} />}
+    <div className={session ? "min-h-full" : "hidden"} aria-hidden={!session}>
       <TopBar
         onToggleDrawer={() => setDrawerOpen((o) => !o)}
         drawerOpen={drawerOpen}
@@ -626,7 +664,9 @@ export default function App() {
         engine={engine}
         onRetryEngine={checkEngine}
         role={role}
-        onRole={setRole}
+        session={session || { company: "", email: "", role }}
+        onSwitchAccount={switchAccount}
+        onLogout={logout}
         roleBadges={roleBadges}
       />
       <Drawer
@@ -641,8 +681,9 @@ export default function App() {
         onNewDocument={newAudit}
         policyName={policyDoc ? policyDoc.name : "PUBLIVRA built-in rules"}
         role={role}
-        onRole={setRole}
-        roleBadges={roleBadges}
+        session={session || { company: "", email: "", role }}
+        onSwitchAccount={switchAccount}
+        onLogout={logout}
       />
 
       <main className="mx-auto max-w-[1600px] px-3 py-5 sm:px-5">
@@ -664,7 +705,13 @@ export default function App() {
                 <RiskBanner
                   risk={risk}
                   scanning={scanning}
-                  extraCounts={visualImages.length ? `${visualImages.length} audited image${visualImages.length === 1 ? "" : "s"}` : null}
+                  extraCounts={
+                    visualImages.length || videos.length
+                      ? [visualImages.length && `${visualImages.length} audited image${visualImages.length === 1 ? "" : "s"}`, videos.length && `${videos.length} audited video${videos.length === 1 ? "" : "s"}`]
+                          .filter(Boolean)
+                          .join(" and ")
+                      : null
+                  }
                   actions={<ApprovalActions submission={currentSub} text={text} canSend={canSend} onPublish={onPublish} onSend={() => setSendOpen(true)} />}
                 />
               ) : (
@@ -693,6 +740,8 @@ export default function App() {
               <VisualAudit
                 policyText={policyDoc?.text || ""}
                 images={visualImages}
+                videos={videos}
+                onVideosChange={setVideos}
                 onImagesChange={setVisualImages}
                 onAuditAdText={runAdTextAudit}
                 toast={toast}
@@ -758,7 +807,7 @@ export default function App() {
           />
         )}
         {(role === "manager" || role === "legal") && (view === "approvals" || view === "legal") && <ReviewPanel role={role} workflow={workflow} toast={toast} />}
-        {view === "insights" && role !== "legal" && <Insights role={role} company={company} onCompanyChange={setCompany} />}
+        {view === "insights" && <Insights company={company} />}
         {view === "history" && (
           <div className="mx-auto max-w-6xl space-y-6">
             <SignoffLog workflow={workflow} />
@@ -791,11 +840,12 @@ export default function App() {
         onClose={() => setSendOpen(false)}
         onConfirm={sendToManager}
         summary={sendSummary}
-        defaultName={currentSub?.creatorName || loadName("creator")}
+        defaultName={currentSub?.creatorName || loadName("creator") || session?.email || ""}
         resubmit={!!currentSub}
       />
       <PolicyViewer open={!!viewer} onClose={() => setViewer(null)} doc={viewer?.doc} target={viewer?.target} />
       <Toasts toasts={toasts} dismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
     </div>
+    </>
   );
 }
