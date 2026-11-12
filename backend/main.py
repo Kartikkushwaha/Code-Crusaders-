@@ -4,6 +4,7 @@ Run locally:   uvicorn main:app --reload --port 8000
 Render start:  uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
 """
 import io
+import json
 import logging
 import os
 import tempfile
@@ -24,7 +25,7 @@ import video_service
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("publivra.api")
 
-VERSION = "2.4.0"  # 2.4: video audit (Gemini video + audio understanding, timeline findings)
+VERSION = "2.5.0"  # 2.5: video audit with a Groq backup engine for when Gemini is overloaded
 
 
 @asynccontextmanager
@@ -141,8 +142,10 @@ def health():
         },
         "database": database.status(),
         "video": {
-            "configured": bool(config.video_models()),
+            "configured": bool(config.video_models()) or config.video_backup_enabled(),
+            "engine": config.VIDEO_ENGINE,
             "models": config.video_models(),
+            "backup": config.GROQ_VISION_MODELS if config.video_backup_enabled() else [],
             "max_seconds": config.VIDEO_MAX_SECONDS,
             "max_mb": config.VIDEO_MAX_BYTES // (1024 * 1024),
         },
@@ -236,10 +239,12 @@ def start_video_audit(
     tone_profile: str = Form("Professional"),
     company: str = Form(""),
     duration: str = Form("", description="Clip length in seconds as measured by the browser (fallback only)"),
+    frames: Optional[List[UploadFile]] = File(None, description="Up to 3 JPEG contact sheets of still frames (for the backup engine)"),
+    frame_times: str = Form("", description="JSON: for each sheet, the time in seconds of each tile"),
 ):
     """Video API: validate the file, create a job and return at once. Poll GET /api/video-audit/{job_id}."""
-    if not config.video_models():
-        raise HTTPException(status_code=503, detail="Video audit needs a Gemini key. Set GOOGLE_API_KEY on the server.")
+    if not config.video_models() and not config.video_backup_enabled():
+        raise HTTPException(status_code=503, detail="Video audit needs an AI key. Set GOOGLE_API_KEY (and GROQ_API_KEY for the backup engine) on the server.")
     if video_service.queue_size() >= 3:
         raise HTTPException(status_code=429, detail="Several videos are already being analysed. Please retry in a minute.")
 
@@ -269,8 +274,24 @@ def start_video_audit(
             os.remove(path)
         raise
 
+    # Still frames prepared by the dashboard: small JPEGs, used only if Gemini is unavailable.
+    sheets, times = [], []
+    try:
+        parsed = json.loads(frame_times) if frame_times.strip() else []
+        times = [[float(t) for t in row][:12] for row in parsed if isinstance(row, list)][:3]
+    except (ValueError, TypeError):
+        times = []
+    for upload in (frames or [])[:3]:
+        data = upload.file.read(1_500_001)
+        if len(data) <= 1_500_000 and data[:2] == b"\xff\xd8":  # JPEG only
+            sheets.append(data)
+    if len(times) != len(sheets):
+        times = []
+
     return video_service.create_job(
         path,
+        frames=sheets,
+        frame_times=times,
         title=(title or video.filename or "Untitled video")[:300],
         policy_text=policy_text[: config.MAX_POLICY_CHARS],
         policy_name=policy_name[:200],

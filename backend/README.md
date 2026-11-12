@@ -94,3 +94,18 @@ A short clip is checked against the same policy as the text and image checks.
 ```bash
 python -m tests.test_video      # offline: a local fake Gemini server covers inline, Files API, fallback and jobs
 ```
+
+### Backup engine (v2.5) - when Gemini answers "high demand"
+
+Gemini's free tier is often overloaded. The video audit no longer depends on it:
+
+1. Gemini models are tried once each (`VIDEO_MODELS`, now including `gemini-3.5-flash-lite`), 60 s per call, 75 s in total.
+2. If none answers, the **Groq backup engine** takes over (needs only `GROQ_API_KEY`):
+   - **Speech:** the clip is streamed to Whisper on Groq (`whisper-large-v3-turbo`), which returns the transcript with timestamps.
+   - **Frames:** the dashboard sends 12 still frames of the clip as 3 small JPEG contact sheets (made in the browser, so the server still needs no FFmpeg). A Groq vision model (`GROQ_VISION_MODELS`) checks them with the transcript against the policy.
+   - The result has the same shape; `engine` is `"groq"` and `engine_notes` says what was not covered.
+3. If the backup also fails, Gemini gets one more pass before the job ends with an error.
+
+**Limits of the backup:** it sees 12 frames, not the whole video, and it cannot hear music or sound effects - only speech. Long policies are cut to `VIDEO_BACKUP_POLICY_CHARS` (12,000) to fit Groq's free-tier token budget.
+
+`VIDEO_ENGINE=groq` skips Gemini completely (fastest when Gemini is down all day); `VIDEO_ENGINE=gemini` turns the backup off.

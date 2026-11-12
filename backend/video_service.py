@@ -1,4 +1,5 @@
-"""Video audit: a 10-20 second clip is checked against the policy by Gemini (video + audio).
+"""Video audit: a 10-20 second clip is checked against the policy by Gemini (video + audio),
+with a Groq backup engine (still frames + Whisper transcript) for when Gemini is overloaded.
 
 Pipeline (see the architecture diagram):
   Video API (main.py)  -> file / duration validation, job creation
@@ -54,6 +55,7 @@ STAGES = {
     "uploading": (30, "Sending the clip to the AI engine"),
     "processing": (45, "The AI engine is reading the frames and the audio"),
     "analysing": (65, "Checking text, colours, audio and tone against the policy"),
+    "backup": (72, "Gemini is busy - switching to the backup engine (still frames + speech transcript)"),
     "aggregating": (90, "Aligning timestamps and matching policy lines"),
     "done": (100, "Analysis complete"),
     "error": (100, "Analysis failed"),
@@ -146,17 +148,29 @@ def check_duration(path: str, client_duration=None) -> float:
 
 
 # --------------------------------------------------------------------------- Gemini REST
-class GeminiError(Exception):
+class ApiError(Exception):
+    """A failed call to an AI provider (status 0 = network problem / timeout)."""
+
     def __init__(self, status: int, message: str):
         super().__init__(f"{status}: {message}")
         self.status = status
         self.message = message
 
 
-def _http(method: str, url: str, headers=None, data=None, timeout=None):
-    """One HTTP call. Returns (response headers, body bytes); raises GeminiError on a non-2xx reply."""
+GeminiError = ApiError  # earlier name
+
+
+def _http(method: str, url: str, headers=None, data=None, timeout=None, provider="gemini"):
+    """One HTTP call. Returns (response headers, body bytes); raises ApiError on a non-2xx reply.
+
+    Each provider only ever receives its own key.
+    """
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("x-goog-api-key", config.GOOGLE_API_KEY)
+    if provider == "groq":
+        req.add_header("Authorization", f"Bearer {config.GROQ_API_KEY}")
+        req.add_header("User-Agent", "publivra-ai/2.5")  # Groq's edge rejects the default Python agent
+    else:
+        req.add_header("x-goog-api-key", config.GOOGLE_API_KEY)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
@@ -168,9 +182,10 @@ def _http(method: str, url: str, headers=None, data=None, timeout=None):
             message = json.loads(raw)["error"]["message"]
         except Exception:
             message = raw or exc.reason
-        raise GeminiError(exc.code, " ".join(str(message).split())[:300])
+        raise ApiError(exc.code, " ".join(str(message).split())[:300])
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise GeminiError(0, f"network error: {str(getattr(exc, 'reason', exc))[:200]}")
+        reason = str(getattr(exc, "reason", exc))
+        raise ApiError(0, "timed out" if "timed out" in reason else f"network error: {reason[:200]}")
 
 
 def upload_file(path: str, mime: str, size: int) -> dict:
@@ -508,6 +523,201 @@ def compute_risk(findings, tone_score: int):
     return level, min(100, score)
 
 
+# --------------------------------------------------------------------------- backup engine (Groq)
+BACKUP_ADDENDUM = """BACKUP MODE - YOU ARE NOT GIVEN THE VIDEO FILE ITSELF. You are given:
+(a) contact sheets: still frames taken from the video at regular intervals. Each tile has its time in
+    seconds printed in its top-left corner, and the user message lists the tile times of every sheet;
+(b) a transcript of the speech with timestamps (it may be empty).
+Treat these as the video. Use the tile times and transcript times for start and end.
+Music, sound effects and the mood of the voice are NOT available to you: never report an event with
+aspect "audio", and ignore the instruction to give an audio event. Judge tone from the words shown and spoken.
+
+"""
+
+
+class _MultipartStream:
+    """multipart/form-data body that streams one file from disk (never holds the clip in memory)."""
+
+    def __init__(self, fields: dict, file_field: str, filename: str, mime: str, path: str):
+        self.boundary = "publivra" + uuid.uuid4().hex
+        head = "".join(f'--{self.boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n' for k, v in fields.items())
+        head += f'--{self.boundary}\r\nContent-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\nContent-Type: {mime}\r\n\r\n'
+        self._head, self._tail = head.encode(), f"\r\n--{self.boundary}--\r\n".encode()
+        self._file = open(path, "rb")
+        self.length = len(self._head) + os.path.getsize(path) + len(self._tail)
+        self._stage = 0
+
+    def read(self, n: int = -1) -> bytes:
+        while self._stage < 3:
+            if self._stage == 1:
+                chunk = self._file.read(n if n and n > 0 else 1024 * 1024)
+                if chunk:
+                    return chunk
+            else:
+                data = self._head if self._stage == 0 else self._tail
+                self._stage += 1
+                return data
+            self._stage += 1
+        return b""
+
+    def close(self):
+        self._file.close()
+
+
+def groq_transcribe(path: str, mime: str, size: int) -> dict:
+    """Speech in the clip, with segment timestamps (Whisper on Groq reads MP4 / WebM directly)."""
+    if size > config.GROQ_TRANSCRIBE_MAX_BYTES:
+        raise ApiError(0, "the clip is too large for the backup transcription (24 MB)")
+    webm = mime == "video/webm"
+    stream = _MultipartStream(
+        {"model": config.GROQ_TRANSCRIBE_MODEL, "response_format": "verbose_json", "temperature": "0"},
+        "file", "clip.webm" if webm else "clip.mp4", "video/webm" if webm else "video/mp4", path,
+    )
+    try:
+        _, body = _http(
+            "POST",
+            f"{config.GROQ_API_BASE}/openai/v1/audio/transcriptions",
+            headers={"Content-Type": f"multipart/form-data; boundary={stream.boundary}", "Content-Length": str(stream.length)},
+            data=stream,
+            provider="groq",
+        )
+    finally:
+        stream.close()
+    data = json.loads(body or b"{}")
+    segments = []
+    for seg in data.get("segments") or []:
+        text = str(seg.get("text") or "").strip()
+        if text and float(seg.get("no_speech_prob") or 0) < 0.8:
+            segments.append({"start": round(float(seg.get("start") or 0), 1), "end": round(float(seg.get("end") or 0), 1), "text": text})
+    text = " ".join(s["text"] for s in segments) if segments else str(data.get("text") or "").strip()
+    return {"text": text, "segments": segments}
+
+
+def groq_vision_models() -> list:
+    """Configured image-capable Groq models that Groq still serves (configured order kept)."""
+    wanted = config.GROQ_VISION_MODELS
+    try:
+        _, body = _http("GET", f"{config.GROQ_API_BASE}/openai/v1/models", provider="groq", timeout=8)
+        live = {m.get("id") for m in json.loads(body).get("data", []) if m.get("active", True)}
+        return [m for m in wanted if m in live] or wanted
+    except Exception as exc:
+        log.info("Could not list Groq models (%s); using the configured vision models.", exc)
+        return wanted
+
+
+def groq_chat(model: str, system: str, user: str, images=()) -> dict:
+    """One JSON-mode chat request to Groq, with optional JPEG images. Returns the parsed JSON object."""
+    content = user
+    if images:
+        content = [{"type": "text", "text": user}] + [
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(img).decode("ascii")}} for img in images
+        ]
+    body = {
+        "model": model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
+        "temperature": 0,
+        "max_completion_tokens": config.LLM_MAX_OUTPUT_TOKENS,
+        "response_format": {"type": "json_object"},
+    }
+    if "gpt-oss" in model:
+        body["reasoning_effort"] = "low"
+    elif "qwen" in model:
+        body["reasoning_format"] = "hidden"  # JSON mode needs hidden reasoning
+    url = f"{config.GROQ_API_BASE}/openai/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    try:
+        _, raw = _http("POST", url, headers=headers, data=json.dumps(body).encode(), provider="groq")
+    except ApiError as exc:
+        if exc.status != 400:
+            raise
+        log.info("%s rejected the JSON-mode settings (%s); retrying without them.", model, exc.message)
+        for key in ("response_format", "reasoning_effort", "reasoning_format"):
+            body.pop(key, None)
+        _, raw = _http("POST", url, headers=headers, data=json.dumps(body).encode(), provider="groq")
+    choices = json.loads(raw).get("choices") or []
+    text = ((choices[0].get("message") or {}).get("content") or "") if choices else ""
+    if not text.strip():
+        raise ValueError("the model returned an empty answer")
+    return brand_engine.extract_json(text)
+
+
+def run_backup(path, mime, size, duration, title, tone_profile, context, frames, frame_times, errors):
+    """Groq backup: Whisper transcript + still frames (contact sheets) judged by a Groq vision model.
+
+    Returns (raw reply, model label, notes) or (None, None, notes) when it could not produce a result.
+    """
+    notes = []
+    transcript = {"text": "", "segments": []}
+    try:
+        transcript = groq_transcribe(path, mime, size)
+    except ApiError as exc:
+        notes.append("The speech could not be transcribed, so spoken words were not checked.")
+        log.warning("Backup transcription failed: %s", exc)
+
+    # ~3 MB of JPEG fits Groq's 4 MB base64 request limit; at most 3 images per request.
+    sheets, times, total = [], [], 0
+    for i, img in enumerate((frames or [])[:3]):
+        if total + len(img) > 2_900_000:
+            break
+        sheets.append(img)
+        times.append((frame_times[i] if frame_times and i < len(frame_times) else []))
+        total += len(img)
+    if not sheets and not transcript["text"]:
+        errors.append("backup engine: no frames and no speech to analyse")
+        return None, None, notes
+    if not sheets:
+        notes.append("No still frames were available, so only the spoken words were checked.")
+
+    lines = context.split("\n")
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) > config.VIDEO_BACKUP_POLICY_CHARS:
+            notes.append(f"The policy is long: the backup engine read its first {len(kept) - 1} lines only.")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    system = (
+        VIDEO_SYSTEM.replace("__TONE__", tone_profile).replace("__DURATION__", f"{duration:g}")
+        .replace("POLICY (every line numbered):", BACKUP_ADDENDUM + "POLICY (every line numbered):")
+        .replace("__CONTEXT__", "\n".join(kept))
+    )
+    spoken = "\n".join(f"[{s['start']:g}s - {s['end']:g}s] {s['text']}" for s in transcript["segments"]) or transcript["text"] or "(no speech)"
+    tiles = "\n".join(
+        f"Sheet {i + 1} tiles, left to right then top to bottom: " + ", ".join(f"{float(t):g}s" for t in ts) for i, ts in enumerate(times) if ts
+    )
+    user = (
+        f"VIDEO TITLE: {title or 'Untitled video'}\nVIDEO LENGTH: {duration:g} seconds\n\n"
+        f"{tiles or ('(no frames available)' if not sheets else '')}\n\nSPEECH TRANSCRIPT:\n{spoken}\n\n"
+        "Audit this video against the policy. Return the JSON object only."
+    )
+
+    models = groq_vision_models() if sheets else config.GROQ_MODELS
+    for model in models:
+        try:
+            raw = groq_chat(model, system, user, sheets)
+        except ApiError as exc:
+            errors.append(f"groq/{model}: {exc.message}")
+            log.warning("Backup video audit with %s failed - trying next. %s", model, exc)
+            if exc.status in (401, 403):
+                break
+            continue
+        except Exception as exc:
+            errors.append(f"groq/{model}: {str(exc)[:160]}")
+            continue
+        raw = raw if isinstance(raw, dict) else {}
+        events = raw.get("events") or raw.get("findings") or []
+        raw["events"] = [e for e in events if isinstance(e, dict) and _aspect(str(e.get("aspect") or e.get("category") or "")) != "audio"]
+        raw["transcript"] = transcript["text"]  # Whisper's transcript, not the vision model's guess
+        raw["audio"] = {
+            "has_speech": bool(transcript["text"]),
+            "has_music": False,
+            "description": "Backup engine: only the speech was analysed. Music and sound effects were not checked.",
+        }
+        frames_used = sum(len(t) for t in times) or len(sheets)
+        return raw, f"{model} · Groq backup ({frames_used} frames + transcript)" if sheets else f"{model} · Groq backup (transcript only)", notes
+    return None, None, notes
+
+
 # --------------------------------------------------------------------------- orchestration
 def build_policy(policy_text: str = "", policy_name: str = ""):
     """(policy name, numbered context for the model, index of numbered lines).
@@ -525,27 +735,10 @@ def build_policy(policy_text: str = "", policy_name: str = ""):
     return name, f"=== {name} ===\n{policy_index.numbered_text(index)}", index
 
 
-def analyse(path: str, *, title="Untitled video", policy_text="", policy_name="", tone_profile="Professional",
-            company="", client_duration=None, progress=None, generate_fn=None, log_to_db=True) -> dict:
-    """Run one video audit end to end. `progress(stage)` is called as the work moves on."""
-    step = progress or (lambda stage: None)
-    models = config.video_models()
-    if not models and generate_fn is None:
-        raise VideoError("Video audit needs a Gemini key. Set GOOGLE_API_KEY on the server.", 503)
-
-    step("validating")
-    size = os.path.getsize(path)
-    if size > config.VIDEO_MAX_BYTES:
-        raise VideoError(f"The video is larger than the {config.VIDEO_MAX_BYTES // (1024 * 1024)} MB limit.", 413)
-    mime = sniff_mime(path)
-    duration = check_duration(path, client_duration)
-
-    name, context, index = build_policy(policy_text, policy_name)
-    tone_profile = tone_profile if tone_profile in ("Professional", "Formal", "Friendly") else "Professional"
-    system = VIDEO_SYSTEM.replace("__TONE__", tone_profile).replace("__DURATION__", f"{duration:g}").replace("__CONTEXT__", context)
-    user = VIDEO_USER.replace("__TITLE__", title or "Untitled video")
-
-    uploaded, raw, model_used, errors = None, None, None, []
+def run_gemini(path, mime, size, models, system, user, step, errors, generate_fn=None, budget=None):
+    """Try the Gemini models in order within a time budget. Returns (raw reply, model) or (None, None)."""
+    budget = budget or config.VIDEO_GEMINI_BUDGET_SECONDS
+    started, uploaded = time.time(), None
     try:
         step("uploading")
         if generate_fn is not None:
@@ -560,12 +753,13 @@ def analyse(path: str, *, title="Untitled video", policy_text="", policy_name=""
             part = {"file_data": {"mime_type": mime, "file_uri": uploaded["uri"]}}
 
         step("analysing")
-        for model in models or ["test-model"]:
-            try:
-                raw = (generate_fn or generate)(model, part, system, user)
-                model_used = model
+        for i, model in enumerate(models):
+            if i and time.time() - started > budget:
+                errors.append(f"Gemini: stopped after {budget} s")
                 break
-            except GeminiError as exc:
+            try:
+                return (generate_fn or generate)(model, part, system, user), model
+            except ApiError as exc:
                 errors.append(f"{model}: {exc.message}")
                 log.warning("Video audit with %s failed - trying next. %s", model, exc)
                 if exc.status in (401, 403):  # a bad or restricted key fails on every model
@@ -573,12 +767,60 @@ def analyse(path: str, *, title="Untitled video", policy_text="", policy_name=""
             except Exception as exc:  # unreadable reply
                 errors.append(f"{model}: {str(exc)[:160]}")
                 log.warning("Video audit with %s returned an unusable reply. %s", model, exc)
-        del part
+    except ApiError as exc:  # the Files API upload itself failed
+        errors.append(f"Gemini upload: {exc.message}")
     finally:
         if uploaded and uploaded.get("name"):
             delete_file(uploaded["name"])
+    return None, None
+
+
+def analyse(path: str, *, title="Untitled video", policy_text="", policy_name="", tone_profile="Professional",
+            company="", client_duration=None, frames=None, frame_times=None, progress=None, generate_fn=None,
+            log_to_db=True, retry_wait=8.0) -> dict:
+    """Run one video audit end to end. `progress(stage)` is called as the work moves on.
+
+    Gemini (frames + audio) is tried first. If it is overloaded or times out, the Groq backup
+    engine analyses the still frames sent by the dashboard plus a Whisper transcript.
+    """
+    step = progress or (lambda stage: None)
+    models = config.video_models()
+    backup = config.video_backup_enabled()
+    if not models and not backup and generate_fn is None:
+        raise VideoError("Video audit needs an AI key. Set GOOGLE_API_KEY (and GROQ_API_KEY for the backup engine) on the server.", 503)
+
+    step("validating")
+    size = os.path.getsize(path)
+    if size > config.VIDEO_MAX_BYTES:
+        raise VideoError(f"The video is larger than the {config.VIDEO_MAX_BYTES // (1024 * 1024)} MB limit.", 413)
+    mime = sniff_mime(path)
+    duration = check_duration(path, client_duration)
+
+    name, context, index = build_policy(policy_text, policy_name)
+    tone_profile = tone_profile if tone_profile in ("Professional", "Formal", "Friendly") else "Professional"
+    system = VIDEO_SYSTEM.replace("__TONE__", tone_profile).replace("__DURATION__", f"{duration:g}").replace("__CONTEXT__", context)
+    user = VIDEO_USER.replace("__TITLE__", title or "Untitled video")
+
+    raw, model_used, engine, errors, notes = None, None, None, [], []
+    use_gemini = bool(models) or generate_fn is not None
+    if use_gemini:
+        raw, model_used = run_gemini(path, mime, size, models or ["test-model"], system, user, step, errors, generate_fn)
+        engine = "gemini" if raw is not None else None
+    if raw is None and backup:
+        step("backup")
+        raw, label, notes = run_backup(path, mime, size, duration, title, tone_profile, context, frames, frame_times, errors)
+        if raw is not None:
+            engine, model_used = "groq", label
+            if use_gemini:
+                notes.insert(0, "Gemini was busy, so this result comes from the backup engine: still frames of the clip plus a speech transcript. Music and sound effects were not analysed.")
+            else:
+                notes.insert(0, "Analysed by the backup engine: still frames of the clip plus a speech transcript. Music and sound effects were not analysed.")
+    if raw is None and use_gemini and not any("API key" in e for e in errors):
+        time.sleep(retry_wait)  # demand spikes are usually short: one more pass before giving up
+        raw, model_used = run_gemini(path, mime, size, models or ["test-model"], system, user, step, errors, generate_fn, budget=45)
+        engine = "gemini" if raw is not None else None
     if raw is None:
-        raise VideoError("All AI models are busy or failed. Please retry in a minute. Details: " + " | ".join(errors), 503)
+        raise VideoError("All AI models are busy or failed. Please retry in a minute. Details: " + " | ".join(dict.fromkeys(errors)), 503)
 
     step("aggregating")
     result = aggregate(raw, duration, index, name)
@@ -588,7 +830,9 @@ def analyse(path: str, *, title="Untitled video", policy_text="", policy_name=""
     result.update(
         title=title,
         source="video",
-        model=f"{model_used} · Gemini",
+        engine=engine,
+        engine_notes=notes,
+        model=f"{model_used} · Gemini" if engine == "gemini" else model_used,
         duration=duration,
         size_bytes=size,
         mime=mime,

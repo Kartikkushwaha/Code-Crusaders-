@@ -30,6 +30,10 @@ import config  # noqa: E402
 
 config.DATABASE_URL = config.DB_HOST = config.DB_PASSWORD = ""
 config.GOOGLE_API_KEY = "test-key"
+config.GROQ_API_KEY = ""  # backup engine off unless a test turns it on
+config.VIDEO_ENGINE = "auto"
+config.GROQ_VISION_MODELS = ["vision-a", "vision-b"]
+config.GROQ_MODELS = ["text-a"]
 config.VIDEO_MODELS = ["model-a", "model-b"]
 config.GEMINI_MODEL, config.GEMINI_FALLBACK_MODELS = "model-b", []
 
@@ -198,7 +202,7 @@ def test_analyse_with_fake_model():
     # every model failing gives one clear error
     path = make_mp4(15)
     try:
-        vs.analyse(path, generate_fn=lambda *a: (_ for _ in ()).throw(vs.GeminiError(429, "quota")), log_to_db=False)
+        vs.analyse(path, generate_fn=lambda *a: (_ for _ in ()).throw(vs.GeminiError(429, "quota")), log_to_db=False, retry_wait=0)
         raise AssertionError("expected VideoError")
     except vs.VideoError as exc:
         assert exc.status == 503 and "model-a: quota" in str(exc)
@@ -211,6 +215,9 @@ class FakeGemini(BaseHTTPRequestHandler):
     log = []
     polls = 0
     reject_generation_config = False
+    gemini_down = False
+    groq_reject_json = False
+    no_speech = False
 
     def log_message(self, *args):
         pass
@@ -228,7 +235,30 @@ class FakeGemini(BaseHTTPRequestHandler):
     def do_POST(self):
         cls = FakeGemini
         raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        assert self.headers.get("x-goog-api-key") == "test-key"
+        if self.path.startswith("/openai/"):
+            # each provider only ever sees its own key
+            assert self.headers.get("Authorization") == "Bearer groq-key" and not self.headers.get("x-goog-api-key")
+            if self.path.endswith("/audio/transcriptions"):
+                assert b'name="model"' in raw and b"whisper-large-v3-turbo" in raw and b'filename="clip.mp4"' in raw
+                cls.log.append(("transcribe", b"ftyp" in raw and b"mvhd" in raw))  # the real clip bytes arrived
+                if cls.no_speech:
+                    return self._json(400, {"error": {"message": "no audio track found"}})
+                return self._json(200, {"text": "ignored", "segments": [
+                    {"start": 1.04, "end": 4.2, "text": " The cheap phone with a 6000 mAh battery."},
+                    {"start": 9.0, "end": 11.5, "text": " Connect with confidence."},
+                    {"start": 12.0, "end": 13.0, "text": " ...", "no_speech_prob": 0.95}]})
+            body = json.loads(raw)
+            content = body["messages"][1]["content"]
+            images = [c for c in content if c["type"] == "image_url"] if isinstance(content, list) else []
+            text = content if isinstance(content, str) else content[0]["text"]
+            cls.log.append(("chat", body["model"], len(images), "response_format" in body, text))
+            if body["model"] == "vision-a":
+                return self._json(429, {"error": {"message": "Rate limit reached"}})
+            if cls.groq_reject_json and "response_format" in body:
+                return self._json(400, {"error": {"message": "json mode is not supported with images"}})
+            assert "BACKUP MODE" in body["messages"][0]["content"] and "[p.1 L3]" in body["messages"][0]["content"]
+            return self._json(200, {"choices": [{"message": {"content": "<think>hmm</think>" + json.dumps(CANNED)}}]})
+        assert self.headers.get("x-goog-api-key") == "test-key" and not self.headers.get("Authorization")
         base = f"http://127.0.0.1:{self.server.server_port}"
         if self.path == "/upload/v1beta/files":
             assert self.headers["X-Goog-Upload-Command"] == "start"
@@ -242,7 +272,7 @@ class FakeGemini(BaseHTTPRequestHandler):
             body = json.loads(raw)
             model = self.path.split("/models/")[1].split(":")[0]
             cls.log.append(("generate", model, "generationConfig" in body, list(body["contents"][0]["parts"][0])))
-            if model == "model-a":
+            if model == "model-a" or cls.gemini_down:
                 return self._json(503, {"error": {"message": "The model is overloaded. Please try again later."}})
             if cls.reject_generation_config and "generationConfig" in body:
                 return self._json(400, {"error": {"message": "Unknown field in generation config"}})
@@ -252,6 +282,8 @@ class FakeGemini(BaseHTTPRequestHandler):
 
     def do_GET(self):
         cls = FakeGemini
+        if self.path == "/openai/v1/models":
+            return self._json(200, {"data": [{"id": "vision-a"}, {"id": "vision-b"}, {"id": "text-a"}, {"id": "whisper-large-v3-turbo"}]})
         cls.polls += 1
         self._json(200, {"name": "files/abc", "state": "ACTIVE" if cls.polls >= 1 else "PROCESSING"})
 
@@ -263,7 +295,7 @@ class FakeGemini(BaseHTTPRequestHandler):
 def _serve():
     server = HTTPServer(("127.0.0.1", 0), FakeGemini)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    config.GEMINI_API_BASE = f"http://127.0.0.1:{server.server_port}"
+    config.GEMINI_API_BASE = config.GROQ_API_BASE = f"http://127.0.0.1:{server.server_port}"
     return server
 
 
@@ -298,6 +330,68 @@ def test_gemini_rest_inline_and_files_api():
     finally:
         FakeGemini.reject_generation_config = False
         config.VIDEO_INLINE_MAX_BYTES = 8 * 1024 * 1024
+        server.shutdown()
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 400  # stands in for a contact sheet
+
+
+def test_backup_engine_when_gemini_is_busy():
+    """The exact failure from production: every Gemini model answers 'high demand'."""
+    server = _serve()
+    config.GROQ_API_KEY = "groq-key"
+    FakeGemini.gemini_down = True
+    try:
+        FakeGemini.log.clear()
+        path = make_mp4(15)
+        stages = []
+        r = vs.analyse(path, title="Busy day", policy_text=POLICY, policy_name="Brand policy.pdf", progress=stages.append, log_to_db=False,
+                       frames=[JPEG, JPEG, JPEG], frame_times=[[0.6, 4.4, 8.1, 11.9], [1.9, 5.6, 9.4, 13.1], [3.1, 6.9, 10.6, 14.4]])
+        kinds = [x[0] for x in FakeGemini.log]
+        assert kinds == ["generate", "generate", "transcribe", "chat", "chat"], kinds  # 2 Gemini models busy -> backup
+        assert FakeGemini.log[2] == ("transcribe", True)
+        assert FakeGemini.log[3][1:3] == ("vision-a", 3) and FakeGemini.log[4][1:4] == ("vision-b", 3, True)  # rate-limited -> next model
+        prompt = FakeGemini.log[4][4]
+        assert "Sheet 2 tiles, left to right then top to bottom: 1.9s, 5.6s, 9.4s, 13.1s" in prompt
+        assert "[1s - 4.2s] The cheap phone with a 6000 mAh battery." in prompt and "..." not in prompt.split("SPEECH TRANSCRIPT")[1].split("Audit")[0]
+        assert "backup" in stages and r["engine"] == "groq" and "Gemini was busy" in r["engine_notes"][0]
+        assert r["model"] == "vision-b · Groq backup (12 frames + transcript)"
+        # non-speech audio cannot be judged from frames: the audio event is dropped, the rest is kept and cited
+        assert r["aspects"]["audio"] == 0 and r["counts"]["CONTRADICTED"] == 3 and r["risk_level"] == "HIGH"
+        assert r["transcript"] == "The cheap phone with a 6000 mAh battery. Connect with confidence."
+        assert r["audio"]["has_speech"] and not r["audio"]["has_music"]
+        assert next(f for f in r["findings"] if f["claim_text"] == "CHEAP PHONE")["policy_ref"]["line"] == 3
+        os.remove(path)
+
+        # a model that refuses JSON mode with images still answers the plain request; a silent clip is fine
+        FakeGemini.log.clear()
+        FakeGemini.groq_reject_json = FakeGemini.no_speech = True
+        config.VIDEO_ENGINE = "groq"  # skip Gemini entirely
+        path = make_mp4(12)
+        r = vs.analyse(path, policy_text=POLICY, frames=[JPEG], frame_times=[[1.5, 4.5, 7.5, 10.5]], log_to_db=False)
+        kinds = [(x[0], x[1]) for x in FakeGemini.log]
+        assert kinds == [("transcribe", True), ("chat", "vision-a"), ("chat", "vision-b"), ("chat", "vision-b")], kinds
+        assert FakeGemini.log[3][3] is False and r["engine"] == "groq" and r["transcript"] == ""
+        assert any("could not be transcribed" in n for n in r["engine_notes"]) and "4 frames" in r["model"]
+
+        # no frames from the browser: the spoken words are still checked, by a text model
+        FakeGemini.log.clear()
+        FakeGemini.groq_reject_json = FakeGemini.no_speech = False
+        r = vs.analyse(path, policy_text=POLICY, log_to_db=False)
+        assert [(x[0], x[1]) for x in FakeGemini.log] == [("transcribe", True), ("chat", "text-a")]
+        assert FakeGemini.log[1][2] == 0 and "transcript only" in r["model"] and any("No still frames" in n for n in r["engine_notes"])
+
+        # nothing to work with at all -> one clear error, no crash
+        FakeGemini.no_speech = True
+        try:
+            vs.analyse(path, policy_text=POLICY, log_to_db=False)
+            raise AssertionError("expected VideoError")
+        except vs.VideoError as exc:
+            assert "no frames and no speech" in str(exc)
+        os.remove(path)
+    finally:
+        FakeGemini.gemini_down = FakeGemini.groq_reject_json = FakeGemini.no_speech = False
+        config.GROQ_API_KEY, config.VIDEO_ENGINE = "", "auto"
         server.shutdown()
 
 
