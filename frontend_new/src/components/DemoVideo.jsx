@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Clapperboard, GripHorizontal, Maximize2, PictureInPicture2, Play, X } from "lucide-react";
 
 // Demo walkthrough, streamed from Google Drive (both files are shared as "anyone with the link").
-const VIDEO_ID = "1kl9lcchbXgx7BuQ-1S8mtBbCESONUgZB";
+const VIDEO_ID = "1Boa4uGYYvNqVXV7AwX5OR7ARaYnh_QyV";
 const POSTER_ID = "1DUJmNPJJXwo5-DOMywVroFRwa9udvNOv";
 const EMBED_URL = `https://drive.google.com/file/d/${VIDEO_ID}/preview`;
 const POSTERS = [
