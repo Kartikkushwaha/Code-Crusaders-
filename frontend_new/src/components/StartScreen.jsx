@@ -205,9 +205,6 @@ export default function StartScreen({ onStart, toast, currentPolicy }) {
               <Lightbulb className="h-4 w-4" /> Try a sample
             </button>
           </div>
-          <p className="mt-3 flex items-center gap-1.5 text-[11px] text-slate-500">
-            <ImageOff className="h-3.5 w-3.5" /> Only text is checked for now; images arrive in Round 3.
-          </p>
         </section>
 
         {/* Step 2: policy */}
