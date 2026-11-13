@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { ArrowRight, Building2, Lock, PlayCircle, Repeat, ShieldCheck, Users } from "lucide-react";
+import { DemoVideoCard, DemoVideoPlayer } from "./DemoVideo.jsx";
 
 function Brand() {
   return (
@@ -38,13 +40,14 @@ function Channel({ icon: Icon, accent, title, desc, points, cta, onClick }) {
 
 /** First screen: two separate channels - a free demo, or a real company workspace. */
 export default function Landing({ onDemo, onCompany }) {
+  const [video, setVideo] = useState(null); // null | "float" | "full"
   return (
     <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(ellipse_at_top,rgba(79,70,229,0.18),transparent_60%)] px-4 py-10">
-      <div className="w-full max-w-4xl">
+      <div className="w-full max-w-4xl lg:max-w-6xl">
         <Brand />
         <h1 className="text-center text-2xl font-extrabold tracking-tight text-white sm:text-3xl">Brand-compliance checks before you publish</h1>
         <p className="mx-auto mt-2 max-w-xl text-center text-sm text-slate-400">Text, logo, images and video checked against your policy, then approved by your manager and legal team.</p>
-        <div className="mt-8 grid gap-4 md:grid-cols-2">
+        <div className="mt-8 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           <Channel
             icon={PlayCircle}
             accent={{ border: "border-amber-500/40 hover:border-amber-400", icon: "bg-gradient-to-br from-amber-500 to-orange-600", cta: "text-amber-200" }}
@@ -71,8 +74,10 @@ export default function Landing({ onDemo, onCompany }) {
             cta="Start as company"
             onClick={onCompany}
           />
+          <DemoVideoCard onOpen={setVideo} />
         </div>
       </div>
+      {video && <DemoVideoPlayer mode={video} onMode={setVideo} onClose={() => setVideo(null)} />}
     </div>
   );
 }
