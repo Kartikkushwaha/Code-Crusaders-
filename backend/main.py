@@ -241,6 +241,8 @@ def start_video_audit(
     duration: str = Form("", description="Clip length in seconds as measured by the browser (fallback only)"),
     frames: Optional[List[UploadFile]] = File(None, description="Up to 3 JPEG contact sheets of still frames (for the backup engine)"),
     frame_times: str = Form("", description="JSON: for each sheet, the time in seconds of each tile"),
+    reference_logo: Optional[UploadFile] = File(None, description="The approved logo (PNG / JPEG / WebP) to compare the video's logo with"),
+    brand_kit: str = Form("", description='JSON brand kit: {"brandName", "motto", "colors": [{"hex"}]}'),
 ):
     """Video API: validate the file, create a job and return at once. Poll GET /api/video-audit/{job_id}."""
     if not config.video_models() and not config.video_backup_enabled():
@@ -288,8 +290,21 @@ def start_video_audit(
     if len(times) != len(sheets):
         times = []
 
+    logo = None
+    if reference_logo is not None:
+        data = reference_logo.file.read(1_000_001)
+        if len(data) <= 1_000_000 and video_service.image_mime(data):
+            logo = data
+    try:
+        kit = json.loads(brand_kit) if brand_kit.strip() else None
+        kit = kit if isinstance(kit, dict) else None
+    except ValueError:
+        kit = None
+
     return video_service.create_job(
         path,
+        reference_logo=logo,
+        brand_kit=kit,
         frames=sheets,
         frame_times=times,
         title=(title or video.filename or "Untitled video")[:300],

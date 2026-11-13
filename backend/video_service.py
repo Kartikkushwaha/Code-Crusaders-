@@ -252,11 +252,14 @@ def _reply_text(payload: dict) -> str:
     return text
 
 
-def generate(model: str, video_part: dict, system: str, user: str) -> dict:
-    """Ask one model for the structured audit. Returns the parsed JSON object."""
+def generate(model: str, video_part: dict, system: str, user: str, extra_parts=()) -> dict:
+    """Ask one model for the structured audit. Returns the parsed JSON object.
+
+    extra_parts: further inline parts placed after the video (the reference logo).
+    """
     body = {
         "system_instruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [video_part, {"text": user}]}],
+        "contents": [{"role": "user", "parts": [video_part, *extra_parts, {"text": user}]}],
         # No temperature / top_p: recent Gemini models reject the old sampling parameters.
         "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": config.VIDEO_MAX_OUTPUT_TOKENS},
     }
@@ -344,9 +347,59 @@ tone_score is 0-10 against the required tone. colours: up to 5 dominant colours,
 Severity: high = legal / privacy / absolute guarantee, medium = factual, colour, logo or policy mismatch,
 low = tone / wording / audio style, none = verified.
 
-POLICY (every line numbered):
+__BRANDKIT__POLICY (every line numbered):
 __CONTEXT__
 """
+
+BRAND_KIT = "Brand kit"
+
+
+def image_mime(data: bytes):
+    """PNG / JPEG / WebP from the first bytes, else None."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def brand_kit_block(kit: dict, has_logo: bool, logo_position: str = "attached after the video") -> str:
+    """Prompt section for the creator's brand kit (reference logo, exact name, motto, colours)."""
+    kit = kit if isinstance(kit, dict) else {}
+    lines = []
+    name, motto = str(kit.get("brandName") or "").strip()[:80], str(kit.get("motto") or "").strip()[:160]
+    colours = [str(c.get("hex") if isinstance(c, dict) else c).upper() for c in (kit.get("colors") or [])][:12]
+    colours = [c for c in colours if re.fullmatch(r"#[0-9A-F]{6}", c)]
+    if name:
+        lines.append(f'- Brand name, must be written exactly like this: "{name}"')
+    if motto:
+        lines.append(f'- Motto / tagline, must be identical: "{motto}"')
+    if colours:
+        lines.append(f"- Brand colours: {', '.join(colours)}")
+    if has_logo:
+        lines.append(
+            f"- Reference logo: the single IMAGE {logo_position} is the approved brand logo (it is not part of the video). "
+            "Compare every logo or watermark in the video with it. CONTRADICTED when it is recoloured, stretched, squashed, "
+            "cropped, redrawn or otherwise altered; UNVERIFIED when no logo appears in the video; VERIFIED when it matches. "
+            'Report this as one or more events with aspect "logo".'
+        )
+    if not lines:
+        return ""
+    return (
+        "BRAND KIT (set by the creator; it has the same force as the policy):\n" + "\n".join(lines)
+        + '\nFor an event that rests on the brand kit, set policy_reference to "BRAND KIT" and put the brand-kit value in policy_quote.\n\n'
+    )
+
+
+def build_system(tone_profile: str, duration: float, context: str, kit_block: str = "", backup: bool = False) -> str:
+    return (
+        VIDEO_SYSTEM.replace("__TONE__", tone_profile).replace("__DURATION__", f"{duration:g}")
+        .replace("__BRANDKIT__", (BACKUP_ADDENDUM if backup else "") + kit_block)
+        .replace("__CONTEXT__", context)
+    )
+
 
 VIDEO_USER = """VIDEO TITLE: __TITLE__
 
@@ -402,7 +455,7 @@ def _span(item: dict, duration: float):
     return round(start, 1), round(end, 1)
 
 
-def aggregate(raw: dict, duration: float, index: list, policy_name: str) -> dict:
+def aggregate(raw: dict, duration: float, index: list, policy_name: str, has_kit: bool = False) -> dict:
     """Validate the model's reply and turn it into dashboard findings.
 
     - timestamps are clamped to the clip and ordered;
@@ -439,12 +492,14 @@ def aggregate(raw: dict, duration: float, index: list, policy_name: str) -> dict
         reference = str(e.get("policy_reference") or e.get("policy_line") or "").strip()
         quote = str(e.get("policy_quote") or e.get("quote") or "").strip()
         universal = "universal" in reference.lower()
-        ref = None if universal else policy_index.find_ref(index, quote, reference)
+        # the creator's brand kit (reference logo, exact name, motto, colours) is a valid source too
+        from_kit = has_kit and bool(re.search(r"brand\s*kit|reference\s*logo", reference, re.I))
+        ref = None if universal or from_kit else policy_index.find_ref(index, quote, reference)
         explanation = str(e.get("explanation") or e.get("problem") or "").strip() or "Flagged by the AI video audit."
-        if verdict == "CONTRADICTED" and not ref and not universal:
+        if verdict == "CONTRADICTED" and not ref and not universal and not from_kit:
             verdict = "UNVERIFIED"
             explanation += " (No policy line could be matched for this, so it is marked Unverified.)"
-        if verdict == "VERIFIED" and not ref:
+        if verdict == "VERIFIED" and not ref and not from_kit:
             verdict = "UNVERIFIED"  # "verified" needs a confirming policy line
             explanation += " (No confirming policy line was found.)"
         severity = brand_engine._severity(str(e.get("severity") or ""), verdict)
@@ -453,7 +508,7 @@ def aggregate(raw: dict, duration: float, index: list, policy_name: str) -> dict
         if ref:
             source = f"{ref['source']}, " + (f"p.{ref['page']} " if ref["page"] else "") + f"line {ref['line']}"
         else:
-            source = UNIVERSAL if universal else "No policy line"
+            source = UNIVERSAL if universal else (BRAND_KIT + (" · Reference logo" if m["aspect"] == "logo" else "")) if from_kit else "No policy line"
         findings.append(
             {
                 "id": "vid:" + hashlib.sha1(f"{m['aspect']}|{m['key']}|{m['start']}|{verdict}".encode()).hexdigest()[:12],
@@ -469,6 +524,7 @@ def aggregate(raw: dict, duration: float, index: list, policy_name: str) -> dict
                 "source_reference": source,
                 "policy_ref": ref,
                 "policy_quote": (ref["text"] if ref and ref["verified"] else "" if universal else quote)[:400],
+                "from_brand_kit": from_kit,
                 "recommendation": "" if verdict == "VERIFIED" else str(e.get("recommendation") or "").strip(),
             }
         )
@@ -610,7 +666,7 @@ def groq_chat(model: str, system: str, user: str, images=()) -> dict:
     content = user
     if images:
         content = [{"type": "text", "text": user}] + [
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(img).decode("ascii")}} for img in images
+            {"type": "image_url", "image_url": {"url": f"data:{image_mime(img) or 'image/jpeg'};base64," + base64.b64encode(img).decode("ascii")}} for img in images
         ]
     body = {
         "model": model,
@@ -641,7 +697,7 @@ def groq_chat(model: str, system: str, user: str, images=()) -> dict:
     return brand_engine.extract_json(text)
 
 
-def run_backup(path, mime, size, duration, title, tone_profile, context, frames, frame_times, errors):
+def run_backup(path, mime, size, duration, title, tone_profile, context, frames, frame_times, errors, kit=None, logo=None):
     """Groq backup: Whisper transcript + still frames (contact sheets) judged by a Groq vision model.
 
     Returns (raw reply, model label, notes) or (None, None, notes) when it could not produce a result.
@@ -656,7 +712,8 @@ def run_backup(path, mime, size, duration, title, tone_profile, context, frames,
 
     # ~3 MB of JPEG fits Groq's 4 MB base64 request limit; at most 3 images per request.
     sheets, times, total = [], [], 0
-    for i, img in enumerate((frames or [])[:3]):
+    # Groq vision models take 3 images: with a reference logo that is 2 contact sheets + the logo
+    for i, img in enumerate((frames or [])[: 2 if logo else 3]):
         if total + len(img) > 2_900_000:
             break
         sheets.append(img)
@@ -676,11 +733,11 @@ def run_backup(path, mime, size, duration, title, tone_profile, context, frames,
             break
         kept.append(line)
         used += len(line) + 1
-    system = (
-        VIDEO_SYSTEM.replace("__TONE__", tone_profile).replace("__DURATION__", f"{duration:g}")
-        .replace("POLICY (every line numbered):", BACKUP_ADDENDUM + "POLICY (every line numbered):")
-        .replace("__CONTEXT__", "\n".join(kept))
-    )
+    use_logo = bool(logo and sheets)
+    kit_block = brand_kit_block(kit, use_logo, "sent LAST, after the contact sheets,")
+    system = build_system(tone_profile, duration, "\n".join(kept), kit_block, backup=True)
+    if logo and not sheets:
+        notes.append("The reference logo could not be compared because no still frames were available.")
     spoken = "\n".join(f"[{s['start']:g}s - {s['end']:g}s] {s['text']}" for s in transcript["segments"]) or transcript["text"] or "(no speech)"
     tiles = "\n".join(
         f"Sheet {i + 1} tiles, left to right then top to bottom: " + ", ".join(f"{float(t):g}s" for t in ts) for i, ts in enumerate(times) if ts
@@ -694,7 +751,7 @@ def run_backup(path, mime, size, duration, title, tone_profile, context, frames,
     models = groq_vision_models() if sheets else config.GROQ_MODELS
     for model in models:
         try:
-            raw = groq_chat(model, system, user, sheets)
+            raw = groq_chat(model, system, user, sheets + ([logo] if use_logo else []))
         except ApiError as exc:
             errors.append(f"groq/{model}: {exc.message}")
             log.warning("Backup video audit with %s failed - trying next. %s", model, exc)
@@ -735,7 +792,7 @@ def build_policy(policy_text: str = "", policy_name: str = ""):
     return name, f"=== {name} ===\n{policy_index.numbered_text(index)}", index
 
 
-def run_gemini(path, mime, size, models, system, user, step, errors, generate_fn=None, budget=None):
+def run_gemini(path, mime, size, models, system, user, step, errors, generate_fn=None, budget=None, extra_parts=()):
     """Try the Gemini models in order within a time budget. Returns (raw reply, model) or (None, None)."""
     budget = budget or config.VIDEO_GEMINI_BUDGET_SECONDS
     started, uploaded = time.time(), None
@@ -758,7 +815,9 @@ def run_gemini(path, mime, size, models, system, user, step, errors, generate_fn
                 errors.append(f"Gemini: stopped after {budget} s")
                 break
             try:
-                return (generate_fn or generate)(model, part, system, user), model
+                if generate_fn is not None:
+                    return generate_fn(model, part, system, user), model
+                return generate(model, part, system, user, extra_parts), model
             except ApiError as exc:
                 errors.append(f"{model}: {exc.message}")
                 log.warning("Video audit with %s failed - trying next. %s", model, exc)
@@ -776,8 +835,8 @@ def run_gemini(path, mime, size, models, system, user, step, errors, generate_fn
 
 
 def analyse(path: str, *, title="Untitled video", policy_text="", policy_name="", tone_profile="Professional",
-            company="", client_duration=None, frames=None, frame_times=None, progress=None, generate_fn=None,
-            log_to_db=True, retry_wait=8.0) -> dict:
+            company="", client_duration=None, frames=None, frame_times=None, reference_logo=None, brand_kit=None,
+            progress=None, generate_fn=None, log_to_db=True, retry_wait=8.0) -> dict:
     """Run one video audit end to end. `progress(stage)` is called as the work moves on.
 
     Gemini (frames + audio) is tried first. If it is overloaded or times out, the Groq backup
@@ -798,17 +857,20 @@ def analyse(path: str, *, title="Untitled video", policy_text="", policy_name=""
 
     name, context, index = build_policy(policy_text, policy_name)
     tone_profile = tone_profile if tone_profile in ("Professional", "Formal", "Friendly") else "Professional"
-    system = VIDEO_SYSTEM.replace("__TONE__", tone_profile).replace("__DURATION__", f"{duration:g}").replace("__CONTEXT__", context)
+    logo = reference_logo if reference_logo and image_mime(reference_logo) else None
+    kit_block = brand_kit_block(brand_kit, bool(logo))
+    system = build_system(tone_profile, duration, context, kit_block)
     user = VIDEO_USER.replace("__TITLE__", title or "Untitled video")
+    logo_parts = [{"inline_data": {"mime_type": image_mime(logo), "data": base64.b64encode(logo).decode("ascii")}}] if logo else []
 
     raw, model_used, engine, errors, notes = None, None, None, [], []
     use_gemini = bool(models) or generate_fn is not None
     if use_gemini:
-        raw, model_used = run_gemini(path, mime, size, models or ["test-model"], system, user, step, errors, generate_fn)
+        raw, model_used = run_gemini(path, mime, size, models or ["test-model"], system, user, step, errors, generate_fn, extra_parts=logo_parts)
         engine = "gemini" if raw is not None else None
     if raw is None and backup:
         step("backup")
-        raw, label, notes = run_backup(path, mime, size, duration, title, tone_profile, context, frames, frame_times, errors)
+        raw, label, notes = run_backup(path, mime, size, duration, title, tone_profile, context, frames, frame_times, errors, kit=brand_kit, logo=logo)
         if raw is not None:
             engine, model_used = "groq", label
             if use_gemini:
@@ -817,13 +879,13 @@ def analyse(path: str, *, title="Untitled video", policy_text="", policy_name=""
                 notes.insert(0, "Analysed by the backup engine: still frames of the clip plus a speech transcript. Music and sound effects were not analysed.")
     if raw is None and use_gemini and not any("API key" in e for e in errors):
         time.sleep(retry_wait)  # demand spikes are usually short: one more pass before giving up
-        raw, model_used = run_gemini(path, mime, size, models or ["test-model"], system, user, step, errors, generate_fn, budget=45)
+        raw, model_used = run_gemini(path, mime, size, models or ["test-model"], system, user, step, errors, generate_fn, budget=45, extra_parts=logo_parts)
         engine = "gemini" if raw is not None else None
     if raw is None:
         raise VideoError("All AI models are busy or failed. Please retry in a minute. Details: " + " | ".join(dict.fromkeys(errors)), 503)
 
     step("aggregating")
-    result = aggregate(raw, duration, index, name)
+    result = aggregate(raw, duration, index, name, has_kit=bool(kit_block))
     findings, tone_score = result["findings"], result["tone_score"]
     level, score = compute_risk(findings, tone_score)
     is_compliant = not any(f["verdict"] == "CONTRADICTED" for f in findings)
@@ -832,6 +894,7 @@ def analyse(path: str, *, title="Untitled video", policy_text="", policy_name=""
         source="video",
         engine=engine,
         engine_notes=notes,
+        logo_checked=bool(logo) and (engine == "gemini" or bool(frames)),
         model=f"{model_used} · Gemini" if engine == "gemini" else model_used,
         duration=duration,
         size_bytes=size,

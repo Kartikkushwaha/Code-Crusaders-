@@ -251,7 +251,7 @@ class FakeGemini(BaseHTTPRequestHandler):
             content = body["messages"][1]["content"]
             images = [c for c in content if c["type"] == "image_url"] if isinstance(content, list) else []
             text = content if isinstance(content, str) else content[0]["text"]
-            cls.log.append(("chat", body["model"], len(images), "response_format" in body, text))
+            cls.log.append(("chat", body["model"], len(images), "response_format" in body, text, body["messages"][0]["content"], [i["image_url"]["url"][:22] for i in images]))
             if body["model"] == "vision-a":
                 return self._json(429, {"error": {"message": "Rate limit reached"}})
             if cls.groq_reject_json and "response_format" in body:
@@ -271,7 +271,8 @@ class FakeGemini(BaseHTTPRequestHandler):
         if self.path.endswith(":generateContent"):
             body = json.loads(raw)
             model = self.path.split("/models/")[1].split(":")[0]
-            cls.log.append(("generate", model, "generationConfig" in body, list(body["contents"][0]["parts"][0])))
+            parts = body["contents"][0]["parts"]
+            cls.log.append(("generate", model, "generationConfig" in body, list(parts[0]), [list(x)[0] for x in parts], body["system_instruction"]["parts"][0]["text"]))
             if model == "model-a" or cls.gemini_down:
                 return self._json(503, {"error": {"message": "The model is overloaded. Please try again later."}})
             if cls.reject_generation_config and "generationConfig" in body:
@@ -308,7 +309,7 @@ def test_gemini_rest_inline_and_files_api():
         r = vs.analyse(path, title="Inline", policy_text=POLICY, policy_name="Brand policy.pdf", log_to_db=False)
         os.remove(path)
         assert [x[0] for x in FakeGemini.log] == ["generate", "generate"]
-        assert FakeGemini.log[1][1:] == ("model-b", True, ["inline_data"])
+        assert FakeGemini.log[1][1:4] == ("model-b", True, ["inline_data"]) and "BRAND KIT" not in FakeGemini.log[1][5]
         assert r["counts"]["CONTRADICTED"] == 4 and r["model"] == "model-b · Gemini"
 
         # larger than the inline limit -> streamed to the Files API, polled, used by URI, then deleted
@@ -325,7 +326,7 @@ def test_gemini_rest_inline_and_files_api():
         assert kinds == ["start", "bytes", "generate", "generate", "generate", "delete"], kinds
         assert FakeGemini.log[0] == ("start", size, "video/mp4") and FakeGemini.log[1] == ("bytes", size)
         # model-b first rejects the generation settings (400), then answers the plain request
-        assert FakeGemini.log[3][1:3] == ("model-b", True) and FakeGemini.log[4][1:] == ("model-b", False, ["file_data"])
+        assert FakeGemini.log[3][1:3] == ("model-b", True) and FakeGemini.log[4][1:4] == ("model-b", False, ["file_data"])
         assert "processing" in stages and r["duration"] == 18.0
     finally:
         FakeGemini.reject_generation_config = False
@@ -391,6 +392,60 @@ def test_backup_engine_when_gemini_is_busy():
         os.remove(path)
     finally:
         FakeGemini.gemini_down = FakeGemini.groq_reject_json = FakeGemini.no_speech = False
+        config.GROQ_API_KEY, config.VIDEO_ENGINE = "", "auto"
+        server.shutdown()
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200  # stands in for the reference logo
+KIT = {"brandName": "NexusMobile", "motto": "Connect with confidence", "colors": [{"hex": "#1e3a8a"}, {"hex": "oops"}]}
+
+
+def test_reference_logo_and_brand_kit():
+    name, context, index = vs.build_policy(POLICY, "Brand policy.pdf")
+    logo_event = {"events": [
+        {"start": 3, "end": 6, "aspect": "logo", "observed": "Logo in the corner is red instead of navy", "verdict": "CONTRADICTED", "severity": "medium",
+         "explanation": "Recoloured logo.", "policy_reference": "BRAND KIT", "policy_quote": "Reference logo", "recommendation": "Use the approved logo file."},
+        {"start": 0, "end": 2, "aspect": "text", "observed": "NexusMobile", "verdict": "VERIFIED", "policy_reference": "Brand kit", "policy_quote": "NexusMobile"},
+    ]}
+    with_kit = vs.aggregate(logo_event, 10, index, name, has_kit=True)["findings"]
+    logo = next(f for f in with_kit if f["aspect"] == "logo")
+    assert logo["verdict"] == "CONTRADICTED" and logo["source_reference"] == "Brand kit · Reference logo" and logo["from_brand_kit"]
+    assert next(f for f in with_kit if f["aspect"] == "text")["verdict"] == "VERIFIED"
+    # with no brand kit supplied, a "brand kit" citation proves nothing: the logo claim is downgraded
+    # (the brand name stays verified only because the policy itself has that line)
+    no_kit = vs.aggregate(logo_event, 10, index, name)["findings"]
+    assert next(f for f in no_kit if f["aspect"] == "logo")["verdict"] == "UNVERIFIED"
+    assert next(f for f in no_kit if f["aspect"] == "text")["policy_ref"]["line"] == 1
+
+    block = vs.brand_kit_block(KIT, True)
+    assert '"NexusMobile"' in block and "#1E3A8A" in block and "OOPS" not in block and "Reference logo" in block
+    assert vs.brand_kit_block({}, False) == "" and vs.image_mime(PNG) == "image/png" and vs.image_mime(b"GIF89a") is None
+
+    server = _serve()
+    try:
+        # Gemini: video, then the logo image, then the instructions
+        FakeGemini.log.clear()
+        path = make_mp4(12)
+        r = vs.analyse(path, policy_text=POLICY, reference_logo=PNG, brand_kit=KIT, log_to_db=False)
+        last = FakeGemini.log[-1]
+        assert last[4] == ["inline_data", "inline_data", "text"] and "BRAND KIT" in last[5] and "attached after the video" in last[5]
+        assert r["logo_checked"] is True
+        # a file that is not an image is ignored rather than sent
+        FakeGemini.log.clear()
+        r = vs.analyse(path, policy_text=POLICY, reference_logo=b"not an image", log_to_db=False)
+        assert FakeGemini.log[-1][4] == ["inline_data", "text"] and r["logo_checked"] is False
+
+        # Groq backup: 2 contact sheets + the logo (3 images is the model's limit)
+        config.GROQ_API_KEY, config.VIDEO_ENGINE = "groq-key", "groq"
+        FakeGemini.log.clear()
+        r = vs.analyse(path, policy_text=POLICY, reference_logo=PNG, brand_kit=KIT, log_to_db=False,
+                       frames=[JPEG, JPEG, JPEG], frame_times=[[1, 4, 7, 10], [2, 5, 8, 11], [3, 6, 9, 11.5]])
+        chat = FakeGemini.log[-1]
+        assert chat[2] == 3 and chat[6][:2] == ["data:image/jpeg;base64"] * 2 and chat[6][2] == "data:image/png;base64,"
+        assert "sent LAST" in chat[5] and "BACKUP MODE" in chat[5] and "Sheet 3" not in chat[4] and "8 frames" in r["model"]
+        assert r["logo_checked"] is True
+        os.remove(path)
+    finally:
         config.GROQ_API_KEY, config.VIDEO_ENGINE = "", "auto"
         server.shutdown()
 

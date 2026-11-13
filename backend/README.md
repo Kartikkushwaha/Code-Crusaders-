@@ -109,3 +109,16 @@ Gemini's free tier is often overloaded. The video audit no longer depends on it:
 **Limits of the backup:** it sees 12 frames, not the whole video, and it cannot hear music or sound effects - only speech. Long policies are cut to `VIDEO_BACKUP_POLICY_CHARS` (12,000) to fit Groq's free-tier token budget.
 
 `VIDEO_ENGINE=groq` skips Gemini completely (fastest when Gemini is down all day); `VIDEO_ENGINE=gemini` turns the backup off.
+
+### Reference logo and brand kit in the video audit
+
+`POST /api/video-audit` also accepts:
+
+| Field | What it is |
+| --- | --- |
+| `reference_logo` | Optional PNG / JPEG / WebP of the approved logo (max 1 MB). Gemini receives it right after the video; the Groq backup receives it as its third image (2 contact sheets + the logo). |
+| `brand_kit` | Optional JSON: `{"brandName": "...", "motto": "...", "colors": [{"hex": "#1E3A8A"}]}` |
+
+The model is told to compare every logo in the video with the reference logo and to cite brand-kit findings as `BRAND KIT`.
+The aggregator accepts that citation only when a brand kit was really sent (`source_reference` becomes `Brand kit` or
+`Brand kit · Reference logo`); otherwise an uncited CONTRADICTED finding is still downgraded to UNVERIFIED. The result has `logo_checked`.
