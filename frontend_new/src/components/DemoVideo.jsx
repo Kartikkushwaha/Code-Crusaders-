@@ -35,7 +35,7 @@ export function DemoVideoCard({ onOpen }) {
         </span>
       </div>
       <h2 className="mt-4 text-xl font-extrabold tracking-tight text-white">Demo walkthrough</h2>
-      <p className="mt-1.5 text-sm text-slate-400">See a full check from draft to publish before you try it.</p>
+      <p className="mt-1.5 text-sm text-slate-400">Preview the full draft-to-publish workflow before starting. Blurry video? Adjust the quality in the player settings.</p>
 
       <button
         onClick={() => onOpen("float")}
