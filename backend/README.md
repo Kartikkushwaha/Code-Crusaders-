@@ -128,13 +128,13 @@ The aggregator accepts that citation only when a brand kit was really sent (`sou
 Multi-company sign-in with exactly three roles per company (Creator, Manager, Legal Approver) and a
 database-backed approval workflow. It serves the dashboard's **Start as company** channel; **Take a demo**
 needs no backend sign-in (its workflow stays in the browser). It uses the six `auth_*` tables that already exist in Neon
-(`migrations/001_workflow.sql` is a reference copy: **do not run it again**).
+(`migrations/001_schema.sql`; `000_reset_public_schema.sql` wipes every table to start from scratch).
 
 ```
 auth/        db.py (reuses database.connection - no second engine), security.py (Argon2id, JWT, rate limits),
              schemas.py, service.py, routes.py
 workflow/    services.py (rules + SQL), routes.py
-migrations/  001_workflow.sql (reference, already applied) · 002_content_audit.sql (optional, see below)
+migrations/  000_reset_public_schema.sql (deletes ALL tables) · 001_schema.sql (the auth_* tables)
 scripts/     smoke_auth.py (HTTP test of the 20 checks against a running server)
 ```
 
@@ -165,10 +165,8 @@ function runs in one transaction on the existing connection helper, with paramet
 - Login is rate limited (8 attempts per 5 minutes per login ID + IP); company registration 6 per hour per IP.
 - Login IDs look like e-mail addresses (suggested as `role@companydomain`) but are not verified as real mailboxes.
 
-**Optional migration `002_content_audit.sql`** adds one nullable `audit JSONB` column to `auth_content`. It stores what the
-creator sends with a submission (risk scores, findings, fixes, image / video audit, note), which the reviewers' panels show.
-Without it everything still works, but reviewers see the title and text only. Run it once by hand in the Neon SQL editor;
-the app never runs migrations itself.
+`auth_content.audit` (JSONB) stores what the creator sends with a submission (risk scores, findings, fixes, image / video
+audit, note), which the reviewers' panels show. The app never runs these SQL files itself: run them in the Neon SQL editor.
 
 **Environment variables (Render):** `AUTH_SECRET_KEY` (required, 32+ characters), `AUTH_TOKEN_HOURS` (12).
 `DATABASE_URL` is reused.
@@ -196,5 +194,19 @@ Request body of `POST /api/auth/company/register`:
   }
 }
 ```
-`company_email` defaults to `contact@<domain>`; an empty `full_name` becomes "<Company> <Role>". The `auth_invitations` table is
-not used by this flow (it stays in place, untouched).
+`company_email` defaults to `contact@<domain>`; an empty `full_name` becomes "<Company> <Role>". 
+
+## Who sees which history (v3.2)
+
+AI audits (`document_compliance`), publications and sign-offs (`publications`) carry an owner tag in their `company` column:
+
+| Tag | Set from |
+| --- | --- |
+| `co:<company_id>` | the signed-in user's token (Start as company). Never taken from the request. |
+| `demo:<session id>` | the random id the dashboard creates for one "Take a demo" session (kept when switching role, new on every demo sign-in) |
+
+- `GET /api/audits` and `GET /api/publications` return only the caller's own items (nothing without a token or demo id).
+- `POST /api/publications/{id}/verify` closes a publication only for its owner, and only once.
+- `GET /api/analytics[/compare]`: `company=""` is the **common graph** (everything, visible to all); any other value returns the
+  caller's **own** company / demo-session graph, whatever name is sent.
+- `auth/tenant.py` resolves the owner; an invalid token is a 401. `tests/test_tenancy.py` checks all of this on PostgreSQL.

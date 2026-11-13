@@ -3,7 +3,7 @@
     TEST_DATABASE_URL=postgresql://user:pass@host/db  python -m tests.test_auth_workflow
 
 Use a scratch database (or a Neon branch) - NOT production. The tests create a temporary schema,
-build the six auth_* tables in it from migrations/001_workflow.sql, run, and drop the schema again;
+build the auth_* tables in it from migrations/001_schema.sql, run, and drop the schema again;
 tables in `public` are never touched.
 
 With psycopg2 installed the app's real database code is used. Without it (as on the build machine)
@@ -77,7 +77,7 @@ def psql(sql: str, *files):
 
 def setup():
     # gen_random_uuid() is built in since PostgreSQL 13, so the pgcrypto line is not needed in the copy
-    ddl = "\n".join(line for line in (ROOT / "migrations" / "001_workflow.sql").read_text().splitlines() if "CREATE EXTENSION" not in line)
+    ddl = (ROOT / "migrations" / "001_schema.sql").read_text()
     scratch = ROOT / "tests" / f".{SCHEMA}.sql"
     scratch.write_text(f'CREATE SCHEMA "{SCHEMA}";\nSET search_path TO "{SCHEMA}", public;\n{ddl}\n')
     try:
@@ -391,11 +391,12 @@ def _():
     assert history == [("manager", "sent_to_legal"), ("legal_approver", "changes_requested"), ("manager", "rejected"), ("manager", "approved")], history  # the full history is kept
 
 
-@check(22, "Optional migration 002: the audit summary is stored and returned")
+@check(22, "The audit summary is stored and returned (and the app still works without the column)")
 def _():
-    assert wf.create_content(S["creator"], "No column yet", "Body.", {"risk": {"score": 40}})["audit"] is None  # ignored without the column
-    psql(f'SET search_path TO "{SCHEMA}", public', ROOT / "migrations" / "002_content_audit.sql")
-    psql(f'SET search_path TO "{SCHEMA}", public', ROOT / "migrations" / "002_content_audit.sql")  # safe to run twice
+    psql(f'ALTER TABLE "{SCHEMA}".auth_content DROP COLUMN audit')
+    wf._audit_column = None
+    assert wf.create_content(S["creator"], "No column", "Body.", {"risk": {"score": 40}})["audit"] is None  # ignored without the column
+    psql(f'ALTER TABLE "{SCHEMA}".auth_content ADD COLUMN audit JSONB')
     wf._audit_column = None
     audit = {"risk": {"score": 40, "level": "MEDIUM", "parts": {"text": {"score": 23}}}, "note": "It's ready\nplease check", "version": 2}
     c = wf.create_content(S["creator"], "With audit", "Body.", audit)

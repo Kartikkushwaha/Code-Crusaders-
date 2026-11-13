@@ -1,6 +1,6 @@
 """Company registration (with its three role logins), login and membership checks.
 
-Tables used (created by migrations/001_workflow.sql, already applied):
+Tables used (created by migrations/001_schema.sql):
   auth_companies, auth_users, auth_company_memberships
 """
 import logging

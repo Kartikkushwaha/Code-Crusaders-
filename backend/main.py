@@ -12,7 +12,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -21,13 +21,14 @@ import audit_service
 import config
 import database
 import video_service
+from auth import tenant as tenancy
 from auth.routes import router as auth_router
 from workflow.routes import router as workflow_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("publivra.api")
 
-VERSION = "3.0.0"  # 3.0: multi-company sign-in (3 roles) and a database-backed approval workflow
+VERSION = "3.2.0"  # 3.2: audit history, publications and the company graph are scoped to the company / demo session
 
 
 @asynccontextmanager
@@ -52,7 +53,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Sign-in (companies, invitations, login) and the approval workflow. Existing routes are unchanged.
+# Sign-in (company registration, login) and the approval workflow.
 app.include_router(auth_router)
 app.include_router(workflow_router)
 
@@ -161,8 +162,9 @@ def health():
 
 
 @app.post("/api/audit")
-def audit(req: AuditRequest):
+def audit(req: AuditRequest, authorization: str = Header(default="")):
     """Main endpoint used by the dashboard: text in, evidence-backed findings out."""
+    owner = tenancy.resolve(authorization, req.company)
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Document text is empty.")
     return _run_audit(
@@ -173,7 +175,7 @@ def audit(req: AuditRequest):
         policy_document=req.policy_document.model_dump() if req.policy_document else None,
         tone_profile=req.tone_profile,
         rule_findings=req.rule_findings,
-        company=req.company.strip(),
+        company=owner,
     )
 
 
@@ -250,8 +252,10 @@ def start_video_audit(
     frame_times: str = Form("", description="JSON: for each sheet, the time in seconds of each tile"),
     reference_logo: Optional[UploadFile] = File(None, description="The approved logo (PNG / JPEG / WebP) to compare the video's logo with"),
     brand_kit: str = Form("", description='JSON brand kit: {"brandName", "motto", "colors": [{"hex"}]}'),
+    authorization: str = Header(default=""),
 ):
     """Video API: validate the file, create a job and return at once. Poll GET /api/video-audit/{job_id}."""
+    owner = tenancy.resolve(authorization, company)
     if not config.video_models() and not config.video_backup_enabled():
         raise HTTPException(status_code=503, detail="Video audit needs an AI key. Set GOOGLE_API_KEY (and GROQ_API_KEY for the backup engine) on the server.")
     if video_service.queue_size() >= 3:
@@ -318,7 +322,7 @@ def start_video_audit(
         policy_text=policy_text[: config.MAX_POLICY_CHARS],
         policy_name=policy_name[:200],
         tone_profile=tone_profile,
-        company=company.strip(),
+        company=owner,
         client_duration=duration,
     )
 
@@ -333,14 +337,14 @@ def video_audit_status(job_id: str):
 
 
 @app.post("/api/publications")
-def create_publication(req: PublicationRequest):
-    findings, tone_score, company = req.findings, req.tone_score, req.company.strip()
-    if findings is None or tone_score is None or not company:
+def create_publication(req: PublicationRequest, authorization: str = Header(default="")):
+    company = tenancy.resolve(authorization, req.company)
+    findings, tone_score = req.findings, req.tone_score
+    if findings is None or tone_score is None:
         report, audit_company = database.get_audit_report(req.audit_id)
-        report = report or {}
+        report = (report or {}) if audit_company == company else {}  # never read another tenant's audit
         findings = findings if findings is not None else report.get("findings", [])
         tone_score = tone_score if tone_score is not None else report.get("tone_score")
-        company = company or audit_company or ""
     tone_score = None if tone_score is None else int(round(float(tone_score)))
     sections = analytics.breakdown(findings, tone_score)
     pub_id, created_at = database.create_publication(
@@ -367,41 +371,51 @@ def create_publication(req: PublicationRequest):
 
 
 @app.post("/api/publications/{pub_id}/verify")
-def verify_publication(pub_id: int, req: VerifyRequest):
+def verify_publication(pub_id: int, req: VerifyRequest, company: str = "", authorization: str = Header(default="")):
+    """Close (sign off) a publication. Only the tenant that published it can, and only once."""
+    owner = tenancy.resolve(authorization, company)
     if not req.approver_name.strip():
         raise HTTPException(status_code=400, detail="Approver name is required.")
-    row = database.verify_publication(pub_id, approver_name=req.approver_name, approver_role=req.approver_role, checklist=req.checklist)
+    row = database.verify_publication(pub_id, approver_name=req.approver_name, approver_role=req.approver_role, checklist=req.checklist, company=owner)
     if row:
         database.log_event(actor="Human", action="verify_close", detail=f"{req.approver_name} ({req.approver_role})", publication_id=pub_id)
     return {"id": pub_id, "db_logged": row is not None, **(row or {"status": "closed"})}
 
 
 @app.get("/api/publications")
-def list_publications(limit: int = 20):
-    return {"items": database.list_publications(max(1, min(limit, 100)))}
+def list_publications(limit: int = 20, company: str = "", authorization: str = Header(default="")):
+    """Publications and sign-offs of the caller's company (or demo session) only."""
+    return {"items": database.list_publications(max(1, min(limit, 100)), tenancy.resolve(authorization, company))}
 
 
 @app.get("/api/audits")
-def list_audits(limit: int = 20):
-    return {"items": database.list_audits(max(1, min(limit, 100)))}
+def list_audits(limit: int = 20, company: str = "", authorization: str = Header(default="")):
+    """AI audits of the caller's company (or demo session) only."""
+    return {"items": database.list_audits(max(1, min(limit, 100)), tenancy.resolve(authorization, company))}
 
 
 @app.get("/api/analytics")
-def get_analytics(stage: str = "before", company: str = "", days: int = 0):
+def get_analytics(stage: str = "before", company: str = "", days: int = 0, authorization: str = Header(default="")):
     """Bar-chart data. stage=before -> AI audits (document_compliance); stage=after -> publications.
 
     x-axis: Tone, Logo, Data & Privacy, Others. y-axis: average risk score (0-100) with its level.
     Each bar also carries the level mix and the most repeated issues for the hover popup.
     """
     stage = "after" if stage == "after" else "before"
-    rows = database.analytics_rows(stage, company.strip() or None, days if days > 0 else None)
-    return {**analytics.chart(rows, stage), "company": company.strip() or None, "db": database.status()["state"]}
+    if not company.strip():
+        # common graph: every check, from every company and demo session
+        rows = database.analytics_rows(stage, None, days if days > 0 else None)
+        return {**analytics.chart(rows, stage), "company": None, "db": database.status()["state"]}
+    # company graph: always the caller's own tenant, whatever name was sent
+    owner = tenancy.resolve(authorization, company)
+    rows = database.analytics_rows(stage, owner, days if days > 0 else None) if owner else []
+    return {**analytics.chart(rows, stage), "company": "own" if owner else None, "db": database.status()["state"]}
 
 
 @app.get("/api/analytics/compare")
-def compare_analytics(company: str = "", days: int = 0):
-    """Before vs after publication in one call, for a side-by-side (grouped) bar chart."""
-    return {"before": get_analytics("before", company, days), "after": get_analytics("after", company, days)}
+def compare_analytics(company: str = "", days: int = 0, authorization: str = Header(default="")):
+    """Before vs after publication in one call. company="" -> common graph; anything else -> own company graph."""
+    return {"before": get_analytics("before", company, days, authorization), "after": get_analytics("after", company, days, authorization)}
 
 
 @app.post("/api/events")

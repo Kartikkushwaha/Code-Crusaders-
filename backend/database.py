@@ -115,19 +115,19 @@ GET_AUDIT_REPORT_SQL = "SELECT report, company FROM document_compliance WHERE id
 VERIFY_PUBLICATION_SQL = """
 UPDATE publications
 SET status = 'closed', approver_name = %s, approver_role = %s, checklist = %s, closed_at = NOW()
-WHERE id = %s
+WHERE id = %s AND company = %s AND status <> 'closed'
 RETURNING id, status, closed_at;
 """
 
 LIST_PUBLICATIONS_SQL = """
 SELECT id, audit_id, title, file_name, risk_level, risk_score, overridden, counts, status,
        approver_name, approver_role, created_at, closed_at
-FROM publications ORDER BY created_at DESC LIMIT %s;
+FROM publications WHERE company = %s ORDER BY created_at DESC LIMIT %s;
 """
 
 LIST_AUDITS_SQL = """
 SELECT id, filename, status, risk_level, tone, summary, model, source, created_at
-FROM document_compliance ORDER BY created_at DESC LIMIT %s;
+FROM document_compliance WHERE company = %s ORDER BY created_at DESC LIMIT %s;
 """
 
 INSERT_EVENT_SQL = """
@@ -260,12 +260,13 @@ def create_publication(*, audit_id, title, file_name, risk_level, risk_score, ov
         return None, None
 
 
-def verify_publication(pub_id, *, approver_name, approver_role, checklist):
-    if not is_configured():
+def verify_publication(pub_id, *, approver_name, approver_role, checklist, company):
+    """Close a publication of `company` (the caller's tenant). None if it is not theirs or already closed."""
+    if not is_configured() or not company:
         return None
     try:
         with connection() as conn, conn.cursor() as cur:
-            cur.execute(VERIFY_PUBLICATION_SQL, (approver_name[:200], approver_role[:100], json.dumps(checklist or []), pub_id))
+            cur.execute(VERIFY_PUBLICATION_SQL, (approver_name[:200], approver_role[:100], json.dumps(checklist or []), pub_id, company))
             row = cur.fetchone()
         if not row:
             return None
@@ -275,24 +276,26 @@ def verify_publication(pub_id, *, approver_name, approver_role, checklist):
         return None
 
 
-def list_publications(limit=20):
-    if not is_configured():
+def list_publications(limit=20, company=None):
+    """Publications of one tenant only (a company, or one demo session). Nothing without a tenant."""
+    if not is_configured() or not company:
         return []
     try:
         with connection() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(LIST_PUBLICATIONS_SQL, (limit,))
+            cur.execute(LIST_PUBLICATIONS_SQL, (company, limit))
             return [_jsonable(dict(r)) for r in cur.fetchall()]
     except Exception as exc:  # pragma: no cover
         log.warning("Could not list publications: %s", exc)
         return []
 
 
-def list_audits(limit=20):
-    if not is_configured():
+def list_audits(limit=20, company=None):
+    """AI audits of one tenant only (a company, or one demo session). Nothing without a tenant."""
+    if not is_configured() or not company:
         return []
     try:
         with connection() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(LIST_AUDITS_SQL, (limit,))
+            cur.execute(LIST_AUDITS_SQL, (company, limit))
             return [_jsonable(dict(r)) for r in cur.fetchall()]
     except Exception as exc:  # pragma: no cover
         log.warning("Could not list audits: %s", exc)

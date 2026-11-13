@@ -26,7 +26,7 @@ _audit_column = None
 
 
 def has_audit_column(cur) -> bool:
-    """True once migrations/002_content_audit.sql has been run (optional `audit` JSONB column)."""
+    """True when auth_content has its `audit` JSONB column (part of migrations/001_schema.sql)."""
     global _audit_column
     if _audit_column is None:
         cur.execute(
