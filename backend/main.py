@@ -21,11 +21,13 @@ import audit_service
 import config
 import database
 import video_service
+from auth.routes import router as auth_router
+from workflow.routes import router as workflow_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("publivra.api")
 
-VERSION = "2.5.0"  # 2.5: video audit with a Groq backup engine for when Gemini is overloaded
+VERSION = "3.0.0"  # 3.0: multi-company sign-in (3 roles) and a database-backed approval workflow
 
 
 @asynccontextmanager
@@ -49,6 +51,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Sign-in (companies, invitations, login) and the approval workflow. Existing routes are unchanged.
+app.include_router(auth_router)
+app.include_router(workflow_router)
 
 
 # --------------------------------------------------------------------------- models
@@ -149,7 +155,8 @@ def health():
             "max_seconds": config.VIDEO_MAX_SECONDS,
             "max_mb": config.VIDEO_MAX_BYTES // (1024 * 1024),
         },
-        "features": ["user-policy-knowledge", "policy-line-refs", "full-policy-review", "section-analytics", "video-audit"],
+        "features": ["user-policy-knowledge", "policy-line-refs", "full-policy-review", "section-analytics", "video-audit", "auth", "approval-workflow"],
+        "auth": {"configured": len(config.AUTH_SECRET_KEY) >= 32},
     }
 
 

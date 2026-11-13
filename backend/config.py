@@ -48,6 +48,13 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001").st
 EMBED_TIMEOUT_SECONDS = int(os.getenv("EMBED_TIMEOUT_SECONDS", "20"))
 
 
+# ---- Multi-company sign-in and approval workflow (auth_* tables) ------------------
+# AUTH_SECRET_KEY signs the login tokens. Set a long random value on Render, e.g.
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+# There is deliberately no default: without it the auth endpoints answer 503.
+AUTH_SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "").strip()
+AUTH_TOKEN_HOURS = int(os.getenv("AUTH_TOKEN_HOURS", "12"))
+
 # ---- Video audit (Gemini video + audio understanding) ---------------------------
 # The clip is sent straight to Gemini, which reads frames, on-screen text and audio itself,
 # so the server needs no FFmpeg and no local model (fits Render's 512 MB tier).
