@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Clapperboard, GripHorizontal, Maximize2, PictureInPicture2, Play, X } from "lucide-react";
+import { Clapperboard, GripHorizontal, Maximize2, Minimize2, PictureInPicture2, Play, X } from "lucide-react";
 
-// Demo walkthrough, streamed from Google Drive (both files are shared as "anyone with the link").
+// Demo walkthrough on Google Drive (both files are shared as "anyone with the link").
 const VIDEO_ID = "1Boa4uGYYvNqVXV7AwX5OR7ARaYnh_QyV";
 const POSTER_ID = "1DUJmNPJJXwo5-DOMywVroFRwa9udvNOv";
+// Played in the browser's own video player (smooth, native phone controls and full screen).
+// If the browser cannot stream the file, Drive's embedded player is used instead.
+const VIDEO_SOURCES = [
+  `https://drive.usercontent.google.com/download?id=${VIDEO_ID}&export=download`,
+  `https://drive.google.com/uc?export=download&id=${VIDEO_ID}`,
+];
 const EMBED_URL = `https://drive.google.com/file/d/${VIDEO_ID}/preview`;
 const POSTERS = [
   `https://drive.google.com/thumbnail?id=${POSTER_ID}&sz=w1280`,
@@ -12,6 +18,7 @@ const POSTERS = [
 
 const FLOAT_W = 440; // floating player width in px (16:9 video + header)
 const MARGIN = 16;
+const PHONE_QUERY = "(max-width: 639px)";
 
 /** Poster with a play button; opening it gives a floating player or a full-screen one. */
 export function DemoVideoCard({ onOpen }) {
@@ -70,14 +77,30 @@ export function DemoVideoCard({ onOpen }) {
   );
 }
 
+function usePhone() {
+  const [phone, setPhone] = useState(() => typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(PHONE_QUERY);
+    const on = () => setPhone(mq.matches);
+    mq.addEventListener?.("change", on);
+    return () => mq.removeEventListener?.("change", on);
+  }, []);
+  return phone;
+}
+
 /**
- * The player. One iframe stays mounted while switching between floating and full screen, so
- * the video keeps playing from the same point. The floating window can be dragged by its bar.
+ * The player. One video element stays mounted while switching between floating and full screen,
+ * so the video keeps playing from the same point. The floating window can be dragged by its bar
+ * (mouse or touch); on phones it sits as a full-width strip at the bottom of the screen.
  */
 export function DemoVideoPlayer({ mode, onMode, onClose }) {
   const boxRef = useRef(null);
+  const videoRef = useRef(null);
   const drag = useRef(null);
+  const phone = usePhone();
   const [pos, setPos] = useState(null); // top-left of the floating window; null = bottom-right corner
+  const [srcIdx, setSrcIdx] = useState(0);
+  const useEmbed = srcIdx >= VIDEO_SOURCES.length;
 
   const clamp = useCallback((x, y) => {
     const el = boxRef.current;
@@ -89,13 +112,20 @@ export function DemoVideoPlayer({ mode, onMode, onClose }) {
     };
   }, []);
 
+  // Start playing as soon as the player opens (the click that opened it allows sound).
+  useEffect(() => {
+    videoRef.current?.play?.().catch(() => {});
+  }, [srcIdx]);
+
   // Full screen: also ask the browser for real full screen; leaving it keeps the full-window view.
   useEffect(() => {
     if (mode !== "full") {
       if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
       return;
     }
-    boxRef.current?.requestFullscreen?.().catch(() => {});
+    const box = boxRef.current;
+    if (box?.requestFullscreen) box.requestFullscreen().catch(() => {});
+    else videoRef.current?.webkitEnterFullscreen?.(); // iPhone Safari: only the video itself can go full screen
   }, [mode]);
 
   useEffect(() => {
@@ -114,7 +144,7 @@ export function DemoVideoPlayer({ mode, onMode, onClose }) {
   }, [mode, onMode, onClose, clamp]);
 
   const startDrag = (e) => {
-    if (mode !== "float" || e.button !== 0 || e.target.closest("button")) return;
+    if (mode !== "float" || phone || (e.pointerType === "mouse" && e.button !== 0) || e.target.closest("button")) return;
     const r = boxRef.current.getBoundingClientRect();
     drag.current = { dx: e.clientX - r.left, dy: e.clientY - r.top };
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -126,7 +156,17 @@ export function DemoVideoPlayer({ mode, onMode, onClose }) {
   const endDrag = () => (drag.current = null);
 
   const full = mode === "full";
-  const floatStyle = pos ? { left: pos.x, top: pos.y, width: FLOAT_W } : { right: MARGIN, bottom: MARGIN, width: FLOAT_W };
+  let floatStyle;
+  if (phone) floatStyle = { left: 8, right: 8, bottom: 8 };
+  else if (pos) floatStyle = { left: pos.x, top: pos.y, width: FLOAT_W };
+  else floatStyle = { right: MARGIN, bottom: MARGIN, width: FLOAT_W };
+
+  const canPip = !useEmbed && typeof document !== "undefined" && document.pictureInPictureEnabled;
+  const pip = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    (document.pictureInPictureElement ? document.exitPictureInPicture() : v.requestPictureInPicture()).catch(() => {});
+  };
 
   return (
     <>
@@ -135,7 +175,7 @@ export function DemoVideoPlayer({ mode, onMode, onClose }) {
         ref={boxRef}
         role="dialog"
         aria-label="PUBLIVRA AI demo walkthrough"
-        style={full ? undefined : { ...floatStyle, maxWidth: `calc(100vw - ${MARGIN * 2}px)` }}
+        style={full ? undefined : { ...floatStyle, maxWidth: `calc(100vw - ${phone ? 16 : MARGIN * 2}px)` }}
         className={
           full
             ? "fixed inset-0 z-[61] flex flex-col bg-black"
@@ -147,18 +187,30 @@ export function DemoVideoPlayer({ mode, onMode, onClose }) {
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
-          className={`flex items-center gap-2 px-3 py-2 ${full ? "bg-black" : "cursor-move select-none border-b border-slate-800 bg-slate-900"}`}
+          style={!full && !phone ? { touchAction: "none" } : undefined}
+          className={`flex items-center gap-2 px-3 py-2 ${full ? "bg-black" : `select-none border-b border-slate-800 bg-slate-900 ${phone ? "" : "cursor-move"}`}`}
         >
-          {!full && <GripHorizontal className="h-4 w-4 text-slate-500" aria-hidden="true" />}
-          <span className="truncate text-xs font-bold text-slate-200">Demo walkthrough · PUBLIVRA AI</span>
-          <div className="ml-auto flex items-center gap-1">
+          {!full && !phone && <GripHorizontal className="h-4 w-4 shrink-0 text-slate-500" aria-hidden="true" />}
+          <span className="min-w-0 truncate text-xs font-bold text-slate-200">Demo walkthrough · PUBLIVRA AI</span>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {canPip && (
+              <button
+                onClick={pip}
+                className={`rounded-lg p-1.5 ${full ? "text-slate-300 hover:bg-white/10" : "text-slate-400 hover:bg-slate-800 hover:text-white"}`}
+                title="Picture-in-picture (keeps playing over other apps and tabs)"
+                aria-label="Picture-in-picture"
+              >
+                <PictureInPicture2 className="h-4 w-4" />
+              </button>
+            )}
             {full ? (
               <button
                 onClick={() => onMode("float")}
-                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-semibold text-slate-300 hover:bg-white/10"
+                className="rounded-lg p-1.5 text-slate-300 hover:bg-white/10"
                 title="Switch to the floating player"
+                aria-label="Switch to the floating player"
               >
-                <PictureInPicture2 className="h-4 w-4" /> Floating
+                <Minimize2 className="h-4 w-4" />
               </button>
             ) : (
               <button
@@ -180,15 +232,33 @@ export function DemoVideoPlayer({ mode, onMode, onClose }) {
             </button>
           </div>
         </div>
-        <div className={full ? "flex flex-1 items-center justify-center p-2 sm:p-6" : ""}>
-          <div className="aspect-video w-full" style={full ? { maxWidth: "min(100%, calc((100vh - 6rem) * 16 / 9))" } : undefined}>
-            <iframe
-              src={EMBED_URL}
-              title="PUBLIVRA AI demo walkthrough"
-              allow="autoplay; fullscreen; picture-in-picture"
-              allowFullScreen
-              className="h-full w-full border-0 bg-black"
-            />
+        <div className={full ? "flex min-h-0 flex-1 items-center justify-center p-0 sm:p-6" : ""}>
+          <div className="aspect-video w-full bg-black" style={full ? { maxWidth: "min(100%, calc((100vh - 6rem) * 16 / 9))" } : undefined}>
+            {useEmbed ? (
+              <iframe
+                src={EMBED_URL}
+                title="PUBLIVRA AI demo walkthrough"
+                allow="autoplay; fullscreen; picture-in-picture"
+                allowFullScreen
+                className="h-full w-full border-0 bg-black"
+              />
+            ) : (
+              <video
+                key={srcIdx}
+                ref={videoRef}
+                src={VIDEO_SOURCES[srcIdx]}
+                poster={POSTERS[0]}
+                controls
+                playsInline
+                autoPlay
+                preload="auto"
+                controlsList="nodownload"
+                onError={() => setSrcIdx((i) => i + 1)}
+                className="h-full w-full bg-black object-contain"
+              >
+                Your browser cannot play this video.
+              </video>
+            )}
           </div>
         </div>
       </div>
