@@ -13,10 +13,11 @@ const inputCls =
   "w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-600 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30";
 
 /**
- * Enterprise sign-in: Step 1 parent company (tenant + domain), Step 2 child role + company ID.
+ * "Take a demo": Step 1 any company name (tenant + domain), Step 2 any role + an ID on that domain.
+ * No password; everything is kept in this browser, so roles can be switched freely.
  * pendingFor(company) -> { creator, manager, legal } counts, shown on the role cards.
  */
-export default function LoginScreen({ initial, onLogin, pendingFor }) {
+export default function DemoLogin({ initial, onLogin, pendingFor, onBack }) {
   const [step, setStep] = useState(initial?.company ? 2 : 1);
   const [company, setCompany] = useState(initial?.company || "");
   const [domain, setDomain] = useState(initial?.domain || "");
@@ -43,18 +44,23 @@ export default function LoginScreen({ initial, onLogin, pendingFor }) {
     e?.preventDefault();
     setTouched(true);
     if (err) return;
-    onLogin({ company: company.trim(), domain: d, role, email: email.trim().toLowerCase(), at: Date.now() });
+    onLogin({ mode: "demo", company: company.trim(), domain: d, role, email: email.trim().toLowerCase(), at: Date.now() });
   };
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(ellipse_at_top,rgba(79,70,229,0.18),transparent_60%)] px-4 py-10">
       <div className="w-full max-w-2xl">
+        {onBack && (
+          <button onClick={onBack} className="mb-4 inline-flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-white">
+            <ArrowLeft className="h-3.5 w-3.5" /> Back
+          </button>
+        )}
         <div className="mb-6 flex items-center justify-center gap-2.5">
           <div className="rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 p-2 shadow-lg shadow-indigo-900/50">
             <ShieldCheck className="h-5 w-5 text-white" />
           </div>
           <span className="text-lg font-extrabold tracking-tight text-white">PUBLIVRA AI</span>
-          <span className="rounded-full border border-slate-700 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Enterprise</span>
+          <span className="rounded-full border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200">Demo</span>
         </div>
 
         {/* stepper */}

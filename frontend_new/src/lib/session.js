@@ -1,11 +1,23 @@
 /**
- * Enterprise sign-in (demo): Parent company -> one of 3 child roles.
- * The company is the tenant: it tags every check, filters the approval queue and the company graph.
- * No passwords - this is a role sign-in for the hackathon demo, kept in localStorage.
+ * Signed-in session, in one of two modes:
+ *
+ *   { mode: "demo", company, domain, role, email }
+ *       "Take a demo": no password, any role, data kept in this browser.
+ *   { mode: "company", token, userId, name, email, company, companyId, domain, role }
+ *       "Start as company": login ID + password checked by the backend, which returns a signed token
+ *       holding the user, the company and the role. Company and role always come from the server.
+ *
+ * The server re-checks the membership on every request, so removing a member ends their access
+ * even while their token is still valid.
  */
-const KEY = "publivra.session.v1";
-const LAST_COMPANY = "publivra.lastCompany.v1";
+const KEY = "publivra.session.v3";
+const LAST_DEMO = "publivra.lastCompany.v1";
+const LAST_LOGIN = "publivra.lastLogin.v1";
 const SUFFIXES = new Set(["corp", "corporation", "inc", "incorporated", "ltd", "limited", "pvt", "private", "llc", "llp", "plc", "co", "company", "group", "gmbh", "sa", "ag", "the"]);
+
+// The dashboard calls the third role "legal"; the database calls it "legal_approver".
+export const toApiRole = (role) => (role === "legal" ? "legal_approver" : role);
+export const toUiRole = (role) => (role === "legal_approver" ? "legal" : role);
 
 /** "Publivra Corp" -> "publivra.com", "Nexus Mobile Pvt Ltd" -> "nexusmobile.com" */
 export function domainFromCompany(name) {
@@ -38,10 +50,28 @@ export function emailError(email, domain) {
   return "";
 }
 
+/** Login response -> company-mode session. */
+export function sessionFromLogin(res) {
+  return {
+    mode: "company",
+    token: res.token,
+    expiresAt: Date.now() + (res.expires_in || 0) * 1000,
+    userId: res.user.user_id,
+    name: res.user.full_name,
+    email: res.user.email,
+    company: res.company.company_name,
+    companyId: res.company.company_id,
+    domain: res.company.company_domain || "",
+    role: toUiRole(res.role),
+  };
+}
+
 export function loadSession() {
   try {
     const s = JSON.parse(localStorage.getItem(KEY) || "null");
-    return s && s.company && s.email && s.role ? s : null;
+    if (!s || !s.company || !s.email || !s.role) return null;
+    if (s.mode === "company") return s.token && (!s.expiresAt || s.expiresAt > Date.now()) ? s : null;
+    return s.mode === "demo" ? s : null;
   } catch {
     return null;
   }
@@ -50,7 +80,8 @@ export function loadSession() {
 export function saveSession(s) {
   try {
     localStorage.setItem(KEY, JSON.stringify(s));
-    localStorage.setItem(LAST_COMPANY, JSON.stringify({ company: s.company, domain: s.domain }));
+    if (s.mode === "company") localStorage.setItem(LAST_LOGIN, JSON.stringify({ email: s.email, role: s.role }));
+    else localStorage.setItem(LAST_DEMO, JSON.stringify({ company: s.company, domain: s.domain }));
   } catch {
     /* ignore */
   }
@@ -64,10 +95,14 @@ export function clearSession() {
   }
 }
 
-export function lastCompany() {
+const read = (key) => {
   try {
-    return JSON.parse(localStorage.getItem(LAST_COMPANY) || "null");
+    return JSON.parse(localStorage.getItem(key) || "null");
   } catch {
     return null;
   }
-}
+};
+/** Demo: the company used last time on this browser. */
+export const lastCompany = () => read(LAST_DEMO);
+/** Company mode: login ID and role of the last sign-in (never the password). */
+export const lastLogin = () => read(LAST_LOGIN);

@@ -78,11 +78,22 @@ function DecisionBox({ role, sub, toast }) {
   }, [sub.id, sub.version, role]);
 
   const remember = () => saveName(role, name.trim());
-  const decide = (action) => {
+  const [saving, setSaving] = useState(false);
+  const decide = async (action) => {
     remember();
     const args = { action, name: name.trim(), note: note.trim(), reason: reason.trim(), improvements: improvements.trim() };
-    if (role === "manager") managerDecision(sub.id, args);
-    else legalDecision(sub.id, args);
+    // The server records the decision under the signed-in reviewer and refuses it if the role,
+    // the company or the content's status does not allow it.
+    setSaving(true);
+    try {
+      if (role === "manager") await managerDecision(sub.id, args);
+      else await legalDecision(sub.id, args);
+    } catch (e) {
+      toast(`Your decision was not saved: ${e.message}`, "danger");
+      return;
+    } finally {
+      setSaving(false);
+    }
     const msg = {
       approve_dual: "Approved as manager and legal approver. Publishing is unlocked for the creator.",
       forward: "Approved and forwarded to the legal approver.",
@@ -188,22 +199,22 @@ function DecisionBox({ role, sub, toast }) {
         )}
 
         {mode === "dual" && (
-          <Button variant="success" className="w-full" disabled={!nameOk || !boxes.manager || !boxes.legal} onClick={() => decide("approve_dual")}>
+          <Button variant="success" className="w-full" disabled={saving || !nameOk || !boxes.manager || !boxes.legal} onClick={() => decide("approve_dual")}>
             <BadgeCheck className="h-4 w-4" /> Accept & unlock publishing
           </Button>
         )}
         {mode === "forward" && (
-          <Button className="w-full" disabled={!nameOk || !boxes.manager} onClick={() => decide("forward")}>
+          <Button className="w-full" disabled={saving || !nameOk || !boxes.manager} onClick={() => decide("forward")}>
             <Forward className="h-4 w-4" /> Approve & forward to Legal Approver
           </Button>
         )}
         {mode === "accept" && (
-          <Button variant="success" className="w-full" disabled={!nameOk || !boxes.legal} onClick={() => decide("approve")}>
+          <Button variant="success" className="w-full" disabled={saving || !nameOk || !boxes.legal} onClick={() => decide("approve")}>
             <CircleCheck className="h-4 w-4" /> Accept & notify creator
           </Button>
         )}
         {mode === "reject" && (
-          <Button variant="danger" className="w-full" disabled={!nameOk || reason.trim().length < 5} onClick={() => decide("reject")}>
+          <Button variant="danger" className="w-full" disabled={saving || !nameOk || reason.trim().length < 5} onClick={() => decide("reject")}>
             <CircleX className="h-4 w-4" /> Reject & notify creator
           </Button>
         )}
@@ -239,12 +250,34 @@ export function SubmissionDetail({ sub, role, toast }) {
             Re-submission after feedback from {sub.lastRejection.name}: “{sub.lastRejection.reason}”
           </p>
         )}
+        {sub.summaryMissing && (
+          <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+            The creator's audit summary (risk scores, findings, image and video checks) was not stored with this item, so the figures below are empty. Review the content itself.
+          </p>
+        )}
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <Stat label="AI risk score" value={`${sub.risk.score}/100 · ${sub.risk.level}`} cls={r.text} />
+          <Stat
+            label={sub.risk.parts ? "Average risk score" : "AI risk score"}
+            value={`${sub.risk.score}/100 · ${sub.risk.level}`}
+            cls={r.text}
+          />
           <Stat label="Contradicted" value={sub.risk.counts.contradicted} cls="text-rose-300" />
           <Stat label="Unverified" value={sub.risk.counts.unverified} cls="text-amber-300" />
           <Stat label="Tone" value={sub.tone ? `${sub.tone.score}/10` : "-"} />
         </div>
+        {sub.risk.parts && (
+          <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-300">
+            {[
+              ["text", "Text & tone"],
+              ["graphics", "Logo & graphics"],
+              ["video", "Video"],
+            ].map(([k, label]) => (
+              <span key={k}>
+                {label}: {sub.risk.parts[k] ? <b className={RISK_STYLE[sub.risk.parts[k].level].text}>{sub.risk.parts[k].score}/100</b> : <span className="text-slate-500">not checked</span>}
+              </span>
+            ))}
+          </p>
+        )}
         <p className="mt-2 text-[11px] text-slate-500">
           {sub.ai
             ? `AI deep audit: ${sub.ai.model}${sub.ai.auditId ? ` · Neon audit #${sub.ai.auditId}` : ""} · ${sub.ai.counts.CONTRADICTED} contradicted, ${sub.ai.counts.UNVERIFIED} unverified, ${sub.ai.counts.VERIFIED} verified${

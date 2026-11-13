@@ -147,7 +147,7 @@ export default function RichTextEditor({ editorRef, docKey, initialHtml, onChang
       </div>
 
       {/* Ribbon */}
-      <div className="flex flex-wrap items-center gap-0.5 border-b border-slate-300 bg-slate-100 px-2 py-1.5" role="toolbar" aria-label="Formatting">
+      <div className="word-surface flex flex-wrap items-center gap-0.5 border-b border-slate-300 bg-slate-100 px-2 py-1.5" role="toolbar" aria-label="Formatting">
         <ToolBtn icon={Undo2} label="Undo (Ctrl+Z)" onClick={() => run("undo")} />
         <ToolBtn icon={Redo2} label="Redo (Ctrl+Y)" onClick={() => run("redo")} />
         <Divider />
@@ -185,7 +185,7 @@ export default function RichTextEditor({ editorRef, docKey, initialHtml, onChang
       </div>
 
       {/* Page */}
-      <div className="relative flex-1 overflow-y-auto bg-slate-200/90 px-3 py-6 scrollbar-thin sm:px-8">
+      <div className="word-surface relative flex-1 overflow-y-auto bg-slate-200/90 px-3 py-6 scrollbar-thin sm:px-8">
         {scanning && <div className="scan-line absolute inset-x-0 top-0 h-0.5" aria-hidden="true" />}
         <div className="mx-auto min-h-full max-w-[816px] rounded-sm bg-white px-8 py-10 shadow-[0_2px_18px_rgba(15,23,42,0.18)] sm:px-14 sm:py-14">
           <div

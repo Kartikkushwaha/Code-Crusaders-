@@ -1,6 +1,7 @@
 // Dependency-free PDF writer for the "Publish Verification Engine".
 // Converts the editor DOM (headings, paragraphs, lists, bold/italic/underline,
-// alignment) into a formatted A4 PDF and appends an audit certificate.
+// alignment) into a formatted A4 PDF: the final content first, then separate text, video and
+// logo & graphics feedback, then an audit certificate.
 
 // Helvetica glyph widths (1/1000 em) for ASCII 32..126.
 const HELV = [
@@ -279,14 +280,178 @@ function drawBanner(wr, { fill, stroke, titleColor, bodyColor, title, lines }) {
 }
 
 const VERDICT_COLOR = { VERIFIED: "#047857", UNVERIFIED: "#b45309", CONTRADICTED: "#b91c1c" };
+const VERDICT_TINT = { VERIFIED: "#f0fdf4", UNVERIFIED: "#fffbeb", CONTRADICTED: "#fef2f2" };
+const VERDICT_GROUPS = [
+  ["CONTRADICTED", "Contradicted - breaks the policy"],
+  ["UNVERIFIED", "Unverified - needs evidence or a human check"],
+  ["VERIFIED", "Verified - matches the policy"],
+];
+const LEVEL_COLOR = { HIGH: "#b91c1c", MEDIUM: "#b45309", LOW: "#047857" };
+const PART_COLOR = { A: "#4f46e5", B: "#2563eb", C: "#c026d3", D: "#0d9488" };
+const CARD_CAP = 30; // findings drawn per verdict group; the rest are counted
+
+const clip = (s, n) => {
+  const t = String(s ?? "").replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, n - 3)}...` : t;
+};
+const clock = (sec) => {
+  const s = Math.max(0, Number(sec) || 0);
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+};
+const ASPECTS = {
+  text: "On-screen text", speech: "Spoken words", audio: "Audio", colour: "Colour theme", logo: "Logo",
+  visual: "Visuals", tone: "Tone", privacy: "Privacy", claim: "Claims",
+};
+
+/**
+ * Video and image results for the PDF, in one shape. Uses what is on screen; if nothing is
+ * (the creator signed in again and reopened approved content) it uses the copy saved with the
+ * submission, which is exactly what the manager and legal approver approved.
+ */
+export function pdfMedia({ videos = [], images = [], saved = null, dismissed = {} }) {
+  const keep = (f) => !dismissed[f.id];
+  const liveV = videos.map((v) => ({
+    name: v.name, duration: v.duration, score: v.score, level: v.level, model: v.model, summary: v.summary || "",
+    findings: v.findings.filter(keep),
+    overrides: v.findings.filter((f) => dismissed[f.id]).map((f) => ({ ...f, reason: dismissed[f.id] })),
+  }));
+  const liveI = images.map((i) => ({
+    name: i.name, logoMatch: i.compare?.score ?? null,
+    findings: [...i.findings, ...(i.adFindings || [])].filter(keep),
+    overrides: [...i.findings, ...(i.adFindings || [])].filter((f) => dismissed[f.id]).map((f) => ({ ...f, reason: dismissed[f.id] })),
+  }));
+  if (liveV.length || liveI.length || !saved) return { videos: liveV, images: liveI, fromSaved: false };
+  const stamp = /^\[\d{2}:\d{2}\]\s*/;
+  return {
+    fromSaved: true,
+    videos: (saved.videos || []).map((v) => ({
+      name: v.name, duration: v.duration, score: v.score, level: v.level, model: v.model, summary: v.summary || "",
+      findings: (v.findings || []).map((f) => ({ ...f, start: f.start ?? f.time, match: String(f.match || "").replace(stamp, "") })),
+      overrides: [],
+    })),
+    images: (saved.images || []).map((i) => ({
+      name: i.name, logoMatch: i.logoMatch ?? null, findings: [...(i.findings || []), ...(i.adFindings || [])], overrides: [],
+    })),
+  };
+}
+
+/** Coloured block that opens each part of the report. */
+function partHeader(wr, { letter, title, subtitle, score }) {
+  const color = PART_COLOR[letter];
+  const subLines = subtitle ? wrapPlain(subtitle, 9.5, CONTENT_W - 28, false) : [];
+  const h = 50 + subLines.length * 13 + (score ? 18 : 0);
+  wr.ensure(h + 20);
+  const top = wr.y;
+  wr.rect(M_L, top - h, CONTENT_W, h, "#f8fafc", "#e2e8f0");
+  wr.rect(M_L, top - h, 5, h, color);
+  wr.text(M_L + 16, top - 16, `PART ${letter}`, { size: 8, bold: true, color });
+  wr.text(M_L + 16, top - 35, title, { size: 15, bold: true, color: "#0f172a" });
+  subLines.forEach((l, i) => wr.text(M_L + 16, top - 52 - i * 13, l, { size: 9.5, color: "#475569" }));
+  if (score) {
+    const y = top - 54 - subLines.length * 13 - 4;
+    let x = M_L + 16;
+    score.forEach(([str, col, bold]) => {
+      wr.text(x, y, str, { size: 9.5, bold, color: col });
+      x += textWidth(str, 9.5, bold) + 4;
+    });
+  }
+  wr.y = top - h - 14;
+}
+
+function scoreBits(sc, counts) {
+  if (!sc) return [["Not checked", "#64748b", true]];
+  const out = [[`Score ${sc.score}/100`, "#0f172a", true], [`${sc.level}`, LEVEL_COLOR[sc.level] || "#0f172a", true]];
+  if (counts) {
+    out.push(["·", "#94a3b8", false]);
+    out.push([`${counts.CONTRADICTED} contradicted`, VERDICT_COLOR.CONTRADICTED, false]);
+    out.push([`${counts.UNVERIFIED} unverified`, VERDICT_COLOR.UNVERIFIED, false]);
+    out.push([`${counts.VERIFIED} verified`, VERDICT_COLOR.VERIFIED, false]);
+  }
+  return out;
+}
+
+const countVerdicts = (list) => {
+  const c = { CONTRADICTED: 0, UNVERIFIED: 0, VERIFIED: 0 };
+  list.forEach((f) => (c[f.verdict] = (c[f.verdict] || 0) + 1));
+  return c;
+};
+
+function subHeading(wr, str, color = "#0f172a", size = 11.5) {
+  wr.ensure(40);
+  wr.space(4);
+  wr.text(M_L, wr.y - size, str, { size, bold: true, color });
+  wr.y -= size + 8;
+}
+
+function note(wr, str, color = "#64748b") {
+  const lines = wrapPlain(str, 9.5, CONTENT_W, false);
+  wr.ensure(lines.length * 13 + 4);
+  lines.forEach((l, i) => wr.text(M_L, wr.y - 10 - i * 13, l, { size: 9.5, italic: true, color }));
+  wr.y -= lines.length * 13 + 8;
+}
+
+/** One finding as a tinted card: label, the flagged text, why, the policy line and the fix. */
+function findingCard(wr, f, label) {
+  const col = VERDICT_COLOR[f.verdict] || "#334155";
+  const W = CONTENT_W - 26;
+  const rows = [];
+  const add = (str, o) => wrapPlain(str, o.size, W, o.bold).forEach((t) => rows.push({ t, ...o }));
+  if (f.match) add(`"${clip(f.match, 260)}"`, { size: 9.5, italic: true, color: "#0f172a" });
+  if (f.explanation) add(clip(f.explanation, 520), { size: 9, color: "#334155" });
+  const policy = f.policyQuote || f.policyRef?.text || "";
+  if (policy) add(`Policy: ${clip(policy, 300)}`, { size: 8.8, color: "#1e3a8a" });
+  else if (f.source || f.clause) add(`Source: ${clip(f.source || f.clause, 160)}`, { size: 8.8, color: "#475569" });
+  const fix = f.recommendation || (f.suggestion?.replace ? `Replace "${clip(f.suggestion.find, 80)}" with "${clip(f.suggestion.replace, 120)}"` : "");
+  if (fix && f.verdict !== "VERIFIED") add(`Fix: ${clip(fix, 300)}`, { size: 8.8, color: "#065f46" });
+  const lh = (o) => o.size * 1.42;
+  const h = 26 + rows.reduce((a, r) => a + lh(r), 0) + 4;
+  wr.ensure(h + 6);
+  const top = wr.y;
+  wr.rect(M_L, top - h, CONTENT_W, h, VERDICT_TINT[f.verdict] || "#f8fafc");
+  wr.rect(M_L, top - h, 3, h, col);
+  wr.text(M_L + 13, top - 15, clip(label, 110), { size: 8.6, bold: true, color: col });
+  let y = top - 30;
+  rows.forEach((r) => {
+    wr.text(M_L + 13, y, r.t, { size: r.size, italic: r.italic, color: r.color });
+    y -= lh(r);
+  });
+  wr.y = top - h - 6;
+}
+
+function verdictGroups(wr, findings, labelOf) {
+  if (!findings.length) return note(wr, "No findings were open for this part.");
+  VERDICT_GROUPS.forEach(([v, heading]) => {
+    const list = findings.filter((f) => f.verdict === v);
+    if (!list.length) return;
+    subHeading(wr, `${heading} (${list.length})`, VERDICT_COLOR[v], 10.5);
+    list.slice(0, CARD_CAP).forEach((f) => findingCard(wr, f, labelOf(f)));
+    if (list.length > CARD_CAP) note(wr, `+ ${list.length - CARD_CAP} more recorded in the PUBLIVRA AI audit trail.`);
+    wr.space(4);
+  });
+}
+
+function overridesList(wr, list) {
+  if (!list.length) return;
+  subHeading(wr, `Human overrides (${list.length})`, "#334155", 10.5);
+  list.forEach((f) => wr.flow([{ text: `"${clip(f.match, 140)}" (${f.verdict}) - reason: ${f.reason}` }], { ...STYLE.li, size: 9.5, indent: 12 }));
+  wr.space(6);
+}
 
 /**
  * Build the final publication PDF.
+ *   Part A  the corrected content, exactly as approved - nothing else on those pages
+ *   Part B  text & tone feedback      Part C  video feedback      Part D  logo & graphics feedback
+ *   then the audit certificate.
  * @returns {Blob}
  */
-export function buildPublicationPdf({ title, blocks, risk, tone, findings, dismissed, policyName, overridden, publishedAt, sourceLabel, aiInfo, approvals }) {
+export function buildPublicationPdf({
+  title, blocks, risk, tone, findings, dismissed, policyName, overridden, publishedAt, sourceLabel, aiInfo, approvals,
+  improvements = [], parts = {}, media = { videos: [], images: [] },
+}) {
   const wr = new Writer();
   const date = new Date(publishedAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+  const videoList = media.videos || [];
+  const imageList = media.images || [];
 
   // Status banner at the top of page 1.
   if (overridden) {
@@ -304,14 +469,16 @@ export function buildPublicationPdf({ title, blocks, risk, tone, findings, dismi
       fill: medium ? "#fffbeb" : "#ecfdf5", stroke: medium ? "#d97706" : "#059669",
       titleColor: medium ? "#92400e" : "#065f46", bodyColor: medium ? "#78350f" : "#064e3b",
       title: `${risk.level} RISK - READY TO PUBLISH`,
-      lines: [
-        `Audited against ${policyName} on ${date}. ${risk.counts.verified} verified, ${risk.counts.unverified} unverified, ${risk.counts.contradicted} contradicted.`,
-        ...(approvals ? [approvals] : []),
-      ],
+      lines: [`Audited against ${policyName} on ${date}. Average risk ${risk.score}/100.`, ...(approvals ? [approvals] : [])],
     });
   }
 
-  // Document body.
+  // ---- Part A: the corrected content, kept apart from every piece of feedback.
+  partHeader(wr, {
+    letter: "A",
+    title: "Final content",
+    subtitle: "The corrected text as the creator finalised it and the reviewers approved it. No AI feedback appears in this part - it is in Parts B, C and D.",
+  });
   blocks.forEach((b, i) => {
     const st = STYLE[b.type] || STYLE.p;
     if (i > 0) wr.space(st.before);
@@ -331,20 +498,93 @@ export function buildPublicationPdf({ title, blocks, risk, tone, findings, dismi
     }
     wr.space(st.after);
   });
+  wr.ensure(30);
+  wr.space(6);
+  wr.line(M_L, wr.y, PAGE_W - M_R, wr.y, "#c7d2fe", 0.8);
+  const endTxt = "End of final content";
+  wr.text(M_L + (CONTENT_W - textWidth(endTxt, 8.5)) / 2, wr.y - 14, endTxt, { size: 8.5, color: "#94a3b8" });
 
-  // Audit certificate.
+  // ---- Part B: text & tone feedback.
+  wr.newPage();
+  const textOpen = findings.filter((f) => !dismissed[f.id]);
+  partHeader(wr, {
+    letter: "B",
+    title: "Text & tone - audit feedback",
+    subtitle: `What PUBLIVRA AI found in the written content. Tone: ${tone.detected || "checked"} - ${tone.score}/10 against "${tone.profile}".`,
+    score: scoreBits(parts.text, countVerdicts(textOpen)),
+  });
+  verdictGroups(wr, textOpen, (f) => [f.verdict, f.ai ? "AI" : "Rule", f.category, f.severity && f.severity !== "none" ? `${f.severity} severity` : null].filter(Boolean).join("  ·  "));
+  if (improvements.length) {
+    subHeading(wr, `Fixes the creator applied (${improvements.length})`, "#065f46", 10.5);
+    improvements.slice(0, 60).forEach((t) => wr.flow([{ text: `• ${clip(t, 220)}` }], { ...STYLE.li, size: 9.5, indent: 6 }));
+    wr.space(6);
+  }
+  overridesList(wr, findings.filter((f) => dismissed[f.id]).map((f) => ({ ...f, reason: dismissed[f.id] })));
+
+  // ---- Part C: video feedback.
+  wr.newPage();
+  const allVideoFindings = videoList.flatMap((v) => v.findings);
+  partHeader(wr, {
+    letter: "C",
+    title: "Video - audit feedback",
+    subtitle: videoList.length
+      ? `${videoList.length} video${videoList.length > 1 ? "s" : ""} checked for on-screen text, speech, audio, colours, logo and tone. Each finding shows when it happens in the clip.`
+      : "No video was audited with this content.",
+    score: videoList.length ? scoreBits(parts.video, countVerdicts(allVideoFindings)) : null,
+  });
+  videoList.forEach((v, i) => {
+    if (i > 0) wr.space(8);
+    subHeading(wr, `Video ${i + 1}: ${clip(v.name, 70)}`, "#701a75", 12);
+    const meta = [
+      v.duration ? `${Number(v.duration).toFixed(1)} s long` : null,
+      v.score != null ? `video score ${v.score}/100${v.level ? ` ${v.level}` : ""}` : null,
+      v.model ? `analysed by ${v.model}` : null,
+    ].filter(Boolean).join("  ·  ");
+    if (meta) note(wr, meta, "#475569");
+    if (v.summary) note(wr, clip(v.summary, 600), "#334155");
+    const sorted = [...v.findings].sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
+    verdictGroups(wr, sorted, (f) => {
+      const when = f.start != null ? (f.end != null && f.end > f.start ? `${clock(f.start)}-${clock(f.end)}` : clock(f.start)) : null;
+      return [f.verdict, when, ASPECTS[f.aspect] || f.category, f.severity && f.severity !== "none" ? `${f.severity} severity` : null].filter(Boolean).join("  ·  ");
+    });
+    overridesList(wr, v.overrides || []);
+  });
+
+  // ---- Part D: logo & graphics feedback.
+  wr.newPage();
+  const allImageFindings = imageList.flatMap((im) => im.findings);
+  partHeader(wr, {
+    letter: "D",
+    title: "Logo & graphics - audit feedback",
+    subtitle: imageList.length
+      ? `${imageList.length} image${imageList.length > 1 ? "s" : ""} checked against the reference logo, the brand colours and the policy (including text inside the images).`
+      : "No logo or graphic was audited with this content.",
+    score: imageList.length ? scoreBits(parts.graphics, countVerdicts(allImageFindings)) : null,
+  });
+  imageList.forEach((im, i) => {
+    if (i > 0) wr.space(8);
+    subHeading(wr, `Image ${i + 1}: ${clip(im.name, 70)}`, "#134e4a", 12);
+    if (im.logoMatch != null) note(wr, `Match with the reference logo: ${im.logoMatch}%`, "#475569");
+    verdictGroups(wr, im.findings, (f) => [f.verdict, f.category, f.severity && f.severity !== "none" ? `${f.severity} severity` : null].filter(Boolean).join("  ·  "));
+    overridesList(wr, im.overrides || []);
+  });
+
+  // ---- Audit certificate.
   wr.newPage();
   wr.flow([{ text: "PUBLIVRA AI Audit Certificate" }], { ...STYLE.h1 });
   wr.line(M_L, wr.y + 2, PAGE_W - M_R, wr.y + 2, "#c7d2fe", 1);
   wr.space(12);
+  const partTxt = (sc) => (sc ? `${sc.score}/100 ${sc.level}` : "not checked");
   const rows = [
     ["Document", title],
     ["Source", sourceLabel],
     ["Policy", policyName],
     ["Published", date],
-    ["Risk level", `${risk.level} (score ${risk.score}/100)`],
+    ["Average risk", `${risk.level} (score ${risk.score}/100)`],
+    ["Part scores", `Text & tone ${partTxt(parts.text)} · Logo & graphics ${partTxt(parts.graphics)} · Video ${partTxt(parts.video)}`],
     ["Claim verdicts", `${risk.counts.verified} verified · ${risk.counts.unverified} unverified · ${risk.counts.contradicted} contradicted`],
     ["Tone", `${tone.detected} - ${tone.score}/10 against "${tone.profile}"${tone.usingFallback ? " (default internal tone)" : " (custom policy)"}`],
+    ["Media audited", `${videoList.length} video(s) · ${imageList.length} image(s)${media.fromSaved ? " (from the approved submission)" : ""}`],
     ["Overrides", `${Object.keys(dismissed).length} finding(s) dismissed with a recorded reason`],
     ["Release mode", overridden ? "Manual override of HIGH risk gate" : "Standard release"],
     [
@@ -364,36 +604,11 @@ export function buildPublicationPdf({ title, blocks, risk, tone, findings, dismi
   });
 
   wr.space(14);
-  wr.flow([{ text: "Findings at time of publication" }], { ...STYLE.h2 });
-  wr.space(4);
-  const active = findings.filter((f) => !dismissed[f.id]);
-  if (!active.length) wr.flow([{ text: "No findings were open at publication." }], STYLE.p);
-  active.slice(0, 40).forEach((f) => {
-    const head = `${f.verdict} · ${f.ai ? "AI · " : ""}${f.category}${f.severity !== "none" ? ` · ${f.severity}` : ""}`;
-    const body = `"${f.match}" - ${f.explanation} Source: ${f.source}.`;
-    const lines = wrapPlain(body, 9, CONTENT_W - 12, false);
-    wr.ensure(16 + lines.length * 12);
-    wr.text(M_L, wr.y - 10, head, { size: 9, bold: true, color: VERDICT_COLOR[f.verdict] });
-    lines.forEach((l, i) => wr.text(M_L + 12, wr.y - 23 - i * 12, l, { size: 9, color: "#334155" }));
-    wr.y -= 18 + lines.length * 12;
-  });
-  if (active.length > 40) wr.flow([{ text: `+ ${active.length - 40} more findings recorded in the PUBLIVRA AI audit trail.` }], STYLE.p);
-
-  const dismissedList = findings.filter((f) => dismissed[f.id]);
-  if (dismissedList.length) {
-    wr.space(10);
-    wr.flow([{ text: "Human overrides" }], { ...STYLE.h2 });
-    dismissedList.forEach((f) => {
-      wr.flow([{ text: `"${f.match}" (${f.verdict}) - reason: ${dismissed[f.id]}` }], { ...STYLE.li, indent: 12 });
-    });
-  }
-
-  wr.space(14);
   drawBanner(wr, {
     fill: "#eff6ff", stroke: "#2563eb", titleColor: "#1e3a8a", bodyColor: "#1e3a8a",
     title: "AI disclosure & human verification",
     lines: [
-      "Findings were generated by PUBLIVRA AI's deterministic rule engine and, where run, an LLM audit (Groq, with Gemini as fallback) restricted to retrieved approved sources (Qdrant). AI never auto-publishes: a named human approver must complete the Human Verification checklist before external release.",
+      "Findings were generated by PUBLIVRA AI's deterministic rule engine and, where run, AI audits of the text, video and images (Groq, with Gemini as fallback) restricted to the policy and retrieved approved sources. AI never auto-publishes: a named human approver must complete the Human Verification checklist before external release.",
     ],
   });
 

@@ -1,7 +1,8 @@
 import { TriangleAlert, ShieldAlert, ShieldCheck } from "lucide-react";
 import { RISK_STYLE } from "./ui.jsx";
+import { PART_LABEL, PART_ORDER } from "../lib/riskParts.js";
 
-export default function RiskBanner({ risk, scanning, actions, extraCounts }) {
+export default function RiskBanner({ risk, scanning, actions, extraCounts, parts }) {
   const s = RISK_STYLE[risk.level];
   const Icon = risk.level === "HIGH" ? ShieldAlert : risk.level === "MEDIUM" ? TriangleAlert : ShieldCheck;
   return (
@@ -18,12 +19,22 @@ export default function RiskBanner({ risk, scanning, actions, extraCounts }) {
 
       <div className="flex-1 sm:px-4">
         <div className="mb-1.5 flex items-center justify-between text-[11px] text-slate-400">
-          <span>Risk score</span>
+          <span>{parts ? "Average risk score" : "Risk score"}</span>
           <span className="font-mono font-semibold text-slate-200">{risk.score}/100</span>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-slate-800">
           <div className={`h-full rounded-full transition-all duration-500 ${s.meter}`} style={{ width: `${Math.max(3, risk.score)}%` }} />
         </div>
+        {parts && (
+          <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+            {PART_ORDER.map((k) => (
+              <span key={k} className="inline-flex items-center gap-1 rounded-full border border-slate-700 bg-slate-950/50 px-2 py-0.5 text-slate-300">
+                {PART_LABEL[k]}
+                {parts[k] ? <b className={`font-mono ${RISK_STYLE[parts[k].level].text}`}>{parts[k].score}</b> : <span className="text-slate-500">not checked</span>}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-300">
           {risk.reasons.length ? risk.reasons.map((r) => <span key={r}>• {r}</span>) : <span>• No open issues - send it to your manager for approval</span>}
           {extraCounts ? <span className="text-slate-400">• includes {extraCounts}</span> : null}

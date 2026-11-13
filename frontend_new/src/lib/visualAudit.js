@@ -537,3 +537,206 @@ export async function auditImage(file, kit, onStep = () => {}) {
     findings,
   };
 }
+
+// ------------------------------------------------- content logo vs reference logo
+/**
+ * Direct check of the logo file used in the content against the reference (approved) logo:
+ *   shape     - both logos are trimmed to their visible area, scaled to the same size and compared
+ *               (normalised cross-correlation of the grey levels; a negative score means inverted)
+ *   proportions - the height / width ratio of the visible area (stretched or squashed)
+ *   colour    - the main brand colour of each logo (ΔE in Lab)
+ */
+
+/** Visible area of a logo: pixels that differ from the corner (background) colour. Works on RGBA data. */
+export function contentBox(data, w, h, tol = 40) {
+  const corners = [0, w - 1, (h - 1) * w, h * w - 1].map((i) => [data[i * 4], data[i * 4 + 1], data[i * 4 + 2]]);
+  const bg = [0, 1, 2].map((c) => corners.reduce((a, p) => a + p[c], 0) / 4);
+  let x0 = w;
+  let y0 = h;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      if (Math.max(Math.abs(data[o] - bg[0]), Math.abs(data[o + 1] - bg[1]), Math.abs(data[o + 2] - bg[2])) > tol) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return { x: 0, y: 0, w, h };
+  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+/** Normalised cross-correlation of two equal-length arrays: 1 identical, 0 unrelated, -1 inverted. */
+export function ncc(a, b) {
+  const n = Math.min(a.length, b.length);
+  let ma = 0;
+  let mb = 0;
+  for (let i = 0; i < n; i++) {
+    ma += a[i];
+    mb += b[i];
+  }
+  ma /= n;
+  mb /= n;
+  let num = 0;
+  let va = 0;
+  let vb = 0;
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - ma;
+    const db = b[i] - mb;
+    num += da * db;
+    va += da * da;
+    vb += db * db;
+  }
+  return va < 1e-6 || vb < 1e-6 ? 0 : num / Math.sqrt(va * vb);
+}
+
+/** Findings for the comparison. cmp: { similarity (-1..1), aspectChange (test/ref ratio), colourDelta, refColour, testColour } */
+export function logoCompareFindings(cmp, label, logoName) {
+  const pct = Math.round(Math.max(0, cmp.similarity) * 100);
+  const base = { category: "Logo", clause: "Brand kit · Reference logo", image: label, match: `Logo match ${pct}%`, score: pct };
+  const out = [];
+  if (cmp.similarity <= -0.5) {
+    out.push({
+      ...base,
+      id: fid(),
+      verdict: "UNVERIFIED",
+      severity: "low",
+      match: "Inverted logo",
+      explanation: "This is the reference logo in reversed (light-on-dark) form. Check the policy allows the reversed version.",
+      recommendation: "Use the reversed logo only if the brand guidelines permit it.",
+    });
+  } else if (cmp.similarity < 0.55) {
+    out.push({
+      ...base,
+      id: fid(),
+      verdict: "CONTRADICTED",
+      severity: "high",
+      match: `Different logo (${pct}% match)`,
+      explanation: `This logo does not match the reference logo${logoName ? ` (${logoName})` : ""}: only ${pct}% alike. It is a different or heavily redrawn logo.`,
+      recommendation: "Use the approved reference logo file.",
+    });
+  } else if (cmp.similarity < 0.8) {
+    out.push({
+      ...base,
+      id: fid(),
+      verdict: "CONTRADICTED",
+      severity: "medium",
+      match: `Logo altered (${pct}% match)`,
+      explanation: `The logo resembles the reference but differs in shape or detail (${pct}% alike): it may be cropped, redrawn, rotated or an old version.`,
+      recommendation: "Replace it with the approved reference logo file.",
+    });
+  }
+  const stretch = cmp.aspectChange - 1;
+  if (Math.abs(stretch) > 0.08)
+    out.push({
+      ...base,
+      id: fid(),
+      verdict: "CONTRADICTED",
+      severity: "high",
+      match: stretch > 0 ? `Logo stretched vertically ${Math.round(stretch * 100)}%` : `Logo squashed vertically ${Math.round(-stretch * 100)}%`,
+      explanation: "The logo's proportions (height to width) differ from the reference logo. Logos must not be stretched or squashed.",
+      recommendation: "Resize the logo proportionally (lock the aspect ratio).",
+    });
+  if (cmp.colourDelta > 18)
+    out.push({
+      ...base,
+      id: fid(),
+      verdict: "CONTRADICTED",
+      severity: "high",
+      match: `Logo recoloured ${cmp.testColour ? cmp.testColour.toUpperCase() : ""}`.trim(),
+      explanation: `The logo colour (${cmp.testColour?.toUpperCase() || "none"}) differs from the reference logo colour (${cmp.refColour?.toUpperCase()}).`,
+      recommendation: `Use the logo in its original colour ${cmp.refColour?.toUpperCase()}.`,
+      swatch: cmp.testColour,
+      expected: cmp.refColour,
+    });
+  if (!out.length)
+    out.push({
+      ...base,
+      id: fid(),
+      verdict: "VERIFIED",
+      severity: "none",
+      explanation: `Matches the reference logo (${pct}% alike), with the same proportions and colour.`,
+    });
+  return out;
+}
+
+/** Trim to the visible area and redraw at exactly w x h. */
+function trimmed(img, w, h) {
+  const c = toCanvas(img, 400);
+  const box = contentBox(c.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data, c.width, c.height);
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(c, box.x, box.y, box.w, box.h, 0, 0, w, h);
+  return { canvas: out, ratio: box.h / box.w };
+}
+
+/**
+ * Audit the logo file used in the content against kit.logo (the reference).
+ * Returns an image entry (kind: "logo") so it counts in the logo & graphics score and goes to the manager.
+ */
+export async function auditContentLogo(file, kit) {
+  const img = await loadImage(await fileToDataUrl(file));
+  const label = `Content logo · ${file.name}`;
+  const entry = {
+    kind: "logo",
+    name: label,
+    fileName: file.name,
+    size: file.size,
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+    thumb: thumbnail(img),
+    colours: [],
+    logo: null,
+    ocrText: "",
+    adText: "",
+    adFindings: [],
+    adStatus: "none",
+  };
+  if (!kit.logo) {
+    entry.findings = [
+      {
+        id: fid(),
+        verdict: "UNVERIFIED",
+        severity: "medium",
+        category: "Logo",
+        match: "No reference logo",
+        explanation: "Upload the reference (approved) logo to compare this logo with it.",
+        recommendation: "Upload the reference logo on the left.",
+        clause: "Brand kit · Reference logo",
+        image: label,
+      },
+    ];
+    return entry;
+  }
+  const ref = await loadImage(kit.logo);
+  // reference shape at its own proportions; the content logo is drawn into the same box, so a
+  // stretched logo is still compared shape-for-shape and its distortion is reported separately
+  const refProbe = trimmed(ref, 120, 120);
+  const W = 96;
+  const H = Math.max(8, Math.min(192, Math.round(W * refProbe.ratio)));
+  const r = trimmed(ref, W, H);
+  const t = trimmed(img, W, H);
+  const pick = (cv) => dominantColors(cv, 4).find((c) => c.chroma >= NEUTRAL_CHROMA && c.share >= 0.05);
+  const refColour = pick(r.canvas);
+  const testColour = pick(t.canvas);
+  const cmp = {
+    similarity: ncc(grayOf(t.canvas), grayOf(r.canvas)),
+    aspectChange: t.ratio / r.ratio,
+    colourDelta: refColour && testColour ? deltaE(refColour.lab, testColour.lab) : refColour && !testColour ? 60 : 0,
+    refColour: refColour?.hex,
+    testColour: testColour?.hex,
+  };
+  entry.compare = { ...cmp, score: Math.round(Math.max(0, cmp.similarity) * 100) };
+  entry.colours = dominantColors(toCanvas(img, 160)).slice(0, 4).map(({ hex, share }) => ({ hex, share: Math.round(share * 100) }));
+  entry.findings = logoCompareFindings(cmp, label, kit.logoName);
+  return entry;
+}

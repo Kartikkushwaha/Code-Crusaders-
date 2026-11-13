@@ -6,18 +6,9 @@ import {
 import { parseUpload, extractPolicySource, ocrNote } from "../lib/fileParser.js";
 import { derivePolicy, COMMON_MISTAKES, ISSUE_GROUPS } from "../lib/insights.js";
 import { BLANK_HTML, SAMPLE_HTML } from "../data/sampleContent.js";
+import { SAMPLE_POLICY } from "../data/samplePolicy.js";
 import { ISSUE_ICONS } from "./issueIcons.js";
 
-const SAMPLE_POLICY = {
-  name: "Sample brand policy.txt",
-  text: `[BRAND TONE & IDENTITY RULES]
-1. Tone must be professional, objective and realistic. Avoid hype or buzzwords like "world's best", "guaranteed #1", "100% bug-free".
-2. Use "AI-powered compliance engine" instead of "magic AI solution". Use "enterprise clients" instead of "customers".
-3. Every metric must be backed by an approved source. Absolute guarantees and zero-risk claims are prohibited.
-4. Never publish personal identifiers such as PAN, Aadhaar, phone numbers or personal emails.
-5. Delivery timelines must not exceed 90 calendar days per phase.`,
-  pages: 1,
-};
 
 /** Drop zone used for both the content file and the policy file. */
 function DropZone({ accept, onFile, busy, children, tone = "blue" }) {
@@ -207,7 +198,7 @@ export default function StartScreen({ onStart, toast, currentPolicy }) {
             <button
               onClick={() => {
                 if (!policy && !usingCurrent) applySamplePolicy();
-                setContent({ html: SAMPLE_HTML, source: { type: "sample", name: "Sample proposal" }, label: "Sample service proposal", meta: "Demo content with common mistakes" });
+                setContent({ html: SAMPLE_HTML, source: { type: "sample", name: "Proclinical Q3 draft copy" }, label: "Proclinical Q3 draft copy", meta: "Three campaign drafts that break the sample policy" });
               }}
               className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 px-3 py-2.5 text-sm font-semibold text-slate-200 hover:border-slate-500"
             >

@@ -1,8 +1,8 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ImagePlus, LoaderCircle, Palette, Plus, RotateCcw, ScanSearch, Sparkles, Trash2, Type, Upload, X } from "lucide-react";
-import { Button, VerdictBadge } from "./ui.jsx";
+import { Button, RISK_STYLE, VerdictBadge } from "./ui.jsx";
 import { effectiveKit, loadSavedKit, normHex, saveKit } from "../lib/brandKit.js";
-import { auditImage, fileToDataUrl, loadImage, logoDataUrl } from "../lib/visualAudit.js";
+import { auditContentLogo, auditImage, fileToDataUrl, loadImage, logoDataUrl } from "../lib/visualAudit.js";
 import VideoAudit from "./VideoAudit.jsx";
 
 const MAX_IMAGES = 6;
@@ -143,7 +143,7 @@ function ImageResult({ r, onRemove, onReRun, busy }) {
 }
 
 function BrandKit({ kit, saved, setSaved, toast }) {
-  const [open, setOpen] = useState(!kit.logo);
+  const [open, setOpen] = useState(false);
   const [hex, setHex] = useState("");
   const logoInput = useRef(null);
   const set = (patch) => {
@@ -174,7 +174,7 @@ function BrandKit({ kit, saved, setSaved, toast }) {
           {kit.logo ? <img src={kit.logo} alt="Reference logo" className="max-h-full max-w-full object-contain" /> : <ImagePlus className="h-4 w-4 text-slate-500" />}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold text-slate-100">Brand kit from your policy</div>
+          <div className="text-sm font-semibold text-slate-100">Brand kit from your policy (colours, brand name, motto)</div>
           <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-slate-400">
             {kit.logo ? "Reference logo set" : "No reference logo yet"} · {kit.colors.length} colour{kit.colors.length === 1 ? "" : "s"}
             {kit.colors.slice(0, 8).map((c) => (
@@ -284,13 +284,206 @@ function BrandKit({ kit, saved, setSaved, toast }) {
   );
 }
 
+function LogoSlot({ title, hint, image, name, tone, onFile, onRemove, emptyLabel, inputLabel }) {
+  const input = useRef(null);
+  return (
+    <div
+      className={`flex min-w-0 flex-col rounded-xl border p-3 ${tone}`}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        const f = [...(e.dataTransfer.files || [])].find((x) => /^image\//.test(x.type));
+        if (f) onFile(f);
+      }}
+    >
+      <div className="text-xs font-semibold text-slate-100">{title}</div>
+      <p className="mt-0.5 text-[11px] text-slate-400">{hint}</p>
+      <button
+        type="button"
+        onClick={() => input.current?.click()}
+        className="mt-2 grid h-28 w-full place-items-center overflow-hidden rounded-lg border border-dashed border-slate-600 bg-white hover:border-indigo-400"
+        aria-label={inputLabel}
+      >
+        {image ? (
+          <img src={image} alt={title} className="max-h-full max-w-full object-contain p-2" />
+        ) : (
+          <span className="flex flex-col items-center gap-1 text-[11px] text-slate-500">
+            <ImagePlus className="h-5 w-5" /> {emptyLabel}
+          </span>
+        )}
+      </button>
+      <div className="mt-2 flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[11px] text-slate-400">{name || "No file"}</span>
+        <Button size="sm" variant={image ? "secondary" : "primary"} onClick={() => input.current?.click()}>
+          <Upload className="h-3.5 w-3.5" /> {image ? "Replace" : "Upload"}
+        </Button>
+        {image && (
+          <button onClick={onRemove} className="text-[11px] text-slate-400 hover:text-rose-300">
+            Remove
+          </button>
+        )}
+      </div>
+      <input
+        ref={input}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+        className="hidden"
+        aria-label={inputLabel}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onFile(f);
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * Logo check: the reference (approved) logo on the left, the logo used in the content on the right.
+ * The content logo is compared with the reference for shape, proportions and colour. Images and
+ * videos are also checked against the reference logo.
+ */
+function LogoCheck({ kit, contentLogo, busy, onReference, onRemoveReference, onContent, onRemoveContent }) {
+  const result = contentLogo?.compare;
+  const verdicts = contentLogo?.findings || [];
+  const worst = verdicts.some((f) => f.verdict === "CONTRADICTED") ? "CONTRADICTED" : verdicts.some((f) => f.verdict === "UNVERIFIED") ? "UNVERIFIED" : "VERIFIED";
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+        <ScanSearch className="h-3.5 w-3.5" /> Logo check
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <LogoSlot
+          title="Reference logo (correct)"
+          hint="The approved logo file from your brand guidelines."
+          image={kit.logo}
+          name={kit.logoName}
+          tone={kit.logo ? "border-emerald-500/40 bg-emerald-500/5" : "border-amber-500/50 bg-amber-500/10"}
+          emptyLabel="Upload the approved logo"
+          inputLabel="Upload reference logo"
+          onFile={onReference}
+          onRemove={onRemoveReference}
+        />
+        <LogoSlot
+          title="Logo used in your content (to test)"
+          hint="The logo file you put in this ad, post or video."
+          image={contentLogo?.thumb}
+          name={contentLogo?.fileName}
+          tone="border-indigo-500/40 bg-indigo-500/5"
+          emptyLabel="Upload the logo to test"
+          inputLabel="Upload content logo to test"
+          onFile={onContent}
+          onRemove={onRemoveContent}
+        />
+      </div>
+      {busy && (
+        <p className="mt-3 flex items-center gap-2 text-xs text-indigo-200" aria-live="polite">
+          <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> Comparing the logos…
+        </p>
+      )}
+      {contentLogo && !busy && (
+        <div className="mt-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <VerdictBadge verdict={worst} />
+            {result ? (
+              <span className="text-slate-300">
+                Match with the reference: <b className="font-mono text-white">{result.score}%</b> · proportions {result.aspectChange >= 1 ? "+" : ""}
+                {Math.round((result.aspectChange - 1) * 100)}%
+                {result.refColour && result.testColour ? (
+                  <span className="ml-1 inline-flex items-center gap-1">
+                    · colour <Swatch hex={result.testColour} size="h-3.5 w-3.5" /> vs <Swatch hex={result.refColour} size="h-3.5 w-3.5" />
+                  </span>
+                ) : null}
+              </span>
+            ) : (
+              <span className="text-slate-400">Waiting for the reference logo.</span>
+            )}
+          </div>
+          <ul className="space-y-1.5">
+            {verdicts.map((f) => (
+              <FindingRow key={f.id} f={f} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Improvement 1 - images & graphics audit in the Creator panel.
  * images: audit results (lifted to App so they count towards risk and go to the manager).
  */
-export default function VisualAudit({ policyText, images, onImagesChange, videos = [], onVideosChange = () => {}, onAuditAdText, toast, log }) {
+export default function VisualAudit({
+  policyText,
+  policyDoc,
+  toneProfile,
+  company,
+  images,
+  onImagesChange,
+  videos = [],
+  onVideosChange = () => {},
+  onAuditAdText,
+  onOpenRef,
+  onEngineOnline,
+  graphicsRisk,
+  toast,
+  log,
+}) {
   const [saved, setSaved] = useState(loadSavedKit);
   const kit = useMemo(() => effectiveKit(policyText, saved), [policyText, saved]);
+  const setKit = (patch) => {
+    const next = { ...saved, ...patch };
+    setSaved(next);
+    if (!saveKit(next)) toast("Brand kit is too large to save in this browser. Use a smaller logo.", "danger");
+  };
+  // ---- logo check: reference logo vs the logo used in the content
+  const contentLogoFile = useRef(null);
+  const [logoBusy, setLogoBusy] = useState(false);
+  const contentLogo = images.find((i) => i.kind === "logo") || null;
+  const pictures = images.filter((i) => i.kind !== "logo");
+  const runContentLogo = async (file, k = kit) => {
+    setLogoBusy(true);
+    try {
+      const entry = await auditContentLogo(file, k);
+      const next = [...latest.current.filter((i) => i.kind !== "logo"), entry];
+      latest.current = next;
+      onImagesChange(next);
+      if (entry.compare) log?.(`Logo check of ${file.name}: ${entry.compare.score}% match with the reference logo, ${entry.findings.filter((f) => f.verdict === "CONTRADICTED").length} problem(s)`, "AI");
+    } catch (e) {
+      toast(`Could not check ${file.name}: ${e.message}`, "danger");
+    } finally {
+      setLogoBusy(false);
+    }
+  };
+  // a new document clears the results: forget the content logo file too
+  useEffect(() => {
+    if (!contentLogo && !logoBusy) contentLogoFile.current = null;
+  }, [contentLogo, logoBusy]);
+  const onContentLogo = (file) => {
+    contentLogoFile.current = file;
+    runContentLogo(file);
+  };
+  const onRemoveContentLogo = () => {
+    contentLogoFile.current = null;
+    const next = latest.current.filter((i) => i.kind !== "logo");
+    latest.current = next;
+    onImagesChange(next);
+  };
+  const onReferenceLogo = async (file) => {
+    try {
+      const img = await loadImage(await fileToDataUrl(file));
+      const logo = logoDataUrl(img);
+      setKit({ logo, logoName: file.name });
+      log?.(`Reference logo set to ${file.name}`);
+      // the content logo is re-checked at once; images and videos on request
+      if (contentLogoFile.current) runContentLogo(contentLogoFile.current, { ...kit, logo, logoName: file.name });
+      toast(pictures.length || videos.length ? "Reference logo saved. Re-run the images and videos to check them against it." : "Reference logo saved.", "success");
+    } catch (e) {
+      toast(e.message, "danger");
+    }
+  };
   const files = useRef(new Map());
   const [busy, setBusy] = useState(null); // { name, step }
   const [open, setOpen] = useState(true);
@@ -333,7 +526,7 @@ export default function VisualAudit({ policyText, images, onImagesChange, videos
   const onFiles = (list) => {
     const imgs = [...list].filter((f) => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|svg)$/i.test(f.name));
     if (!imgs.length) return toast("Choose PNG, JPG, WEBP or SVG images.", "danger");
-    const room = MAX_IMAGES - latest.current.length;
+    const room = MAX_IMAGES - latest.current.filter((i) => i.kind !== "logo").length;
     const take = imgs.slice(0, Math.max(0, room));
     if (take.length < imgs.length) toast(`Up to ${MAX_IMAGES} images per check.`, "danger");
     take.forEach((f) => files.current.set(f.name, f));
@@ -359,7 +552,10 @@ export default function VisualAudit({ policyText, images, onImagesChange, videos
     return { ...kit, ...patch };
   };
 
-  const reRunAll = () => runAll(latest.current.map((i) => files.current.get(i.name)).filter(Boolean));
+  const reRunAll = () => {
+    if (contentLogoFile.current) runContentLogo(contentLogoFile.current);
+    runAll(latest.current.filter((i) => i.kind !== "logo").map((i) => files.current.get(i.name)).filter(Boolean));
+  };
 
   const totals = images.reduce(
     (a, i) => {
@@ -378,21 +574,28 @@ export default function VisualAudit({ policyText, images, onImagesChange, videos
             <ScanSearch className="h-5 w-5 text-indigo-300" />
           </div>
           <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-white">Images & graphics audit</h2>
+            <h2 className="flex flex-wrap items-center gap-2 text-sm font-semibold text-white">
+              Logo, images & graphics audit
+              {graphicsRisk && (
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wide ${RISK_STYLE[graphicsRisk.level].pill}`} title="Risk score of the logo & graphics checks">
+                  Logo & graphics score {graphicsRisk.score}/100
+                </span>
+              )}
+            </h2>
             <p className="text-[11px] text-slate-400">
               {images.length
-                ? `${images.length} image${images.length === 1 ? "" : "s"} · ${totals.CONTRADICTED} contradicted · ${totals.UNVERIFIED} unverified · ${totals.VERIFIED} verified`
+                ? `${contentLogo ? `logo ${contentLogo.compare ? `${contentLogo.compare.score}% match` : "uploaded"} · ` : ""}${pictures.length} image${pictures.length === 1 ? "" : "s"} · ${totals.CONTRADICTED} contradicted · ${totals.UNVERIFIED} unverified · ${totals.VERIFIED} verified`
                 : "Logo, brand colours and text inside images, checked against your policy"}
             </p>
           </div>
         </button>
         <div className="flex items-center gap-2">
           {images.length > 0 && (
-            <Button size="sm" variant="secondary" onClick={reRunAll} disabled={!!busy}>
+            <Button size="sm" variant="secondary" onClick={reRunAll} disabled={!!busy || logoBusy}>
               <RotateCcw className="h-3.5 w-3.5" /> Re-run
             </Button>
           )}
-          <Button size="sm" onClick={() => input.current?.click()} disabled={!!busy || images.length >= MAX_IMAGES}>
+          <Button size="sm" onClick={() => input.current?.click()} disabled={!!busy || pictures.length >= MAX_IMAGES}>
             <ImagePlus className="h-3.5 w-3.5" /> Add images
           </Button>
           <button onClick={() => setOpen((o) => !o)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800" aria-label="Toggle images audit">
@@ -414,6 +617,15 @@ export default function VisualAudit({ policyText, images, onImagesChange, videos
       </div>
       {open && (
         <div className="space-y-3 border-t border-slate-800 p-4">
+          <LogoCheck
+            kit={kit}
+            contentLogo={contentLogo}
+            busy={logoBusy}
+            onReference={onReferenceLogo}
+            onRemoveReference={() => setKit({ logo: null, logoName: "" })}
+            onContent={onContentLogo}
+            onRemoveContent={onRemoveContentLogo}
+          />
           <BrandKit kit={kit} saved={saved} setSaved={setSaved} toast={toast} />
           {busy && (
             <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-200" aria-live="polite">
@@ -421,9 +633,12 @@ export default function VisualAudit({ policyText, images, onImagesChange, videos
               {busy.name}: {busy.step}…
             </div>
           )}
-          {images.length ? (
+          <div className="flex items-center gap-1.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+            <ImagePlus className="h-3.5 w-3.5" /> Ads, posters & social graphics
+          </div>
+          {pictures.length ? (
             <div className="grid gap-3 lg:grid-cols-2">
-              {images.map((r) => (
+              {pictures.map((r) => (
                 <ImageResult
                   key={r.name}
                   r={r}
@@ -460,7 +675,19 @@ export default function VisualAudit({ policyText, images, onImagesChange, videos
         </div>
       )}
     </section>
-    <VideoAudit kit={kit} videos={videos} onVideosChange={onVideosChange} onAuditAdText={onAuditAdText} ensureSampleKit={ensureSampleKit} toast={toast} log={log} />
+    <VideoAudit
+      kit={kit}
+      policyDoc={policyDoc}
+      toneProfile={toneProfile}
+      company={company}
+      videos={videos}
+      onVideosChange={onVideosChange}
+      ensureSampleKit={ensureSampleKit}
+      onOpenRef={onOpenRef}
+      onEngineOnline={onEngineOnline}
+      toast={toast}
+      log={log}
+    />
     </>
   );
 }

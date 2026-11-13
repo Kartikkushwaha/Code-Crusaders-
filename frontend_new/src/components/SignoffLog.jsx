@@ -47,7 +47,9 @@ function Track({ icon: Icon, title, children }) {
   );
 }
 
-function Card({ s }) {
+const REOPENABLE = { draft: "Open in editor", rejected: "Open to revise", approved: "Open to publish" };
+
+function Card({ s, onOpen, current }) {
   const [open, setOpen] = useState(false);
   const r = RISK_STYLE[s.risk.level];
   const m = s.approvals.manager;
@@ -93,6 +95,17 @@ function Card({ s }) {
           </div>
         </Track>
       </div>
+      {onOpen && REOPENABLE[s.status] && (
+        <div className="flex items-center justify-end gap-2 px-3 pb-3">
+          {current ? (
+            <span className="text-[11px] text-slate-500">Open in the editor now</span>
+          ) : (
+            <button onClick={() => onOpen(s)} className="rounded-lg border border-indigo-500/50 bg-indigo-500/10 px-2.5 py-1 text-xs font-semibold text-indigo-100 hover:bg-indigo-500/20">
+              {REOPENABLE[s.status]}
+            </button>
+          )}
+        </div>
+      )}
       {open && (
         <div className="border-t border-slate-800 p-3">
           <SignoffTimeline sub={s} />
@@ -103,7 +116,7 @@ function Card({ s }) {
 }
 
 /** History & sign-off log - shared by the Creator, Manager and Legal panels. */
-export function SignoffLog({ workflow, title = "Approvals, publication & sign-off log" }) {
+export function SignoffLog({ workflow, title = "Approvals, publication & sign-off log", onOpen = null, currentId = null }) {
   const subs = workflow.submissions;
   return (
     <section className="space-y-3" aria-label="Sign-off log">
@@ -114,7 +127,7 @@ export function SignoffLog({ workflow, title = "Approvals, publication & sign-of
       {subs.length ? (
         <ul className="space-y-2">
           {subs.map((s) => (
-            <Card key={s.id} s={s} />
+            <Card key={s.id} s={s} onOpen={onOpen} current={s.id === currentId} />
           ))}
         </ul>
       ) : (

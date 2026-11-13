@@ -299,7 +299,7 @@ function DataTableView({ data, stages }) {
 }
 
 /** One chart card with its own filters. company = "" -> all checks (common graph). */
-function ChartCard({ title, subtitle, icon: Icon, company, needsCompany }) {
+function ChartCard({ title, subtitle, icon: Icon, company, scope = "", needsCompany }) {
   const [mode, setMode] = useState("compare"); // before | after | compare
   const [days, setDays] = useState(0);
   const [state, setState] = useState({ loading: true, error: null, data: null });
@@ -313,12 +313,13 @@ function ChartCard({ title, subtitle, icon: Icon, company, needsCompany }) {
     }
     setState((s) => ({ ...s, loading: true, error: null }));
     try {
-      const data = await api.analytics({ company, days });
+      // company graph: the server always answers for the caller's own company / demo session
+      const data = await api.analytics({ company: company ? scope || "own" : "", days });
       setState({ loading: false, error: null, data });
     } catch (e) {
       setState({ loading: false, error: e.message, data: null });
     }
-  }, [company, days, needsCompany]);
+  }, [company, scope, days, needsCompany]);
 
   useEffect(() => {
     load();
@@ -424,7 +425,7 @@ function ChartCard({ title, subtitle, icon: Icon, company, needsCompany }) {
  * Improvement 2 - analytics. The same dashboard in the Creator, Manager and Legal approver panels:
  * the common graph (all companies) and the company graph (the signed-in parent company).
  */
-export default function Insights({ company }) {
+export default function Insights({ company, scope = "", demo = false }) {
   return (
     <div className="mx-auto max-w-6xl space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -440,10 +441,11 @@ export default function Insights({ company }) {
       </div>
       <ChartCard title="Common graph" subtitle="All checks across every company." icon={Globe} company="" />
       <ChartCard
-        title={`Company graph - ${company}`}
-        subtitle="Same graph, only for checks and publications from your company."
+        title={demo ? `Your demo session - ${company}` : `Company graph - ${company}`}
+        subtitle={demo ? "Same graph, only for the checks and publications of this demo session." : "Same graph, only for checks and publications from your company."}
         icon={Building2}
         company={company}
+        scope={scope}
         needsCompany
       />
     </div>

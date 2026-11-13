@@ -12,14 +12,17 @@ const TONE = {
   indigo: "border-indigo-500/40 bg-indigo-500/10 text-indigo-100",
 };
 
+/** Same content, ignoring whitespace (the editor re-renders text reopened from the server). */
+export const sameText = (a, b) => String(a || "").replace(/\s+/g, " ").trim() === String(b || "").replace(/\s+/g, " ").trim();
+
 export function approvalState(sub, text) {
   if (!sub) return { key: "none", changed: false };
-  const changed = sub.text !== text;
-  return { key: sub.status, changed };
+  const changed = !sameText(sub.text, text);
+  return { key: sub.status === "draft" ? "none" : sub.status, changed };
 }
 
 /** Notification banner at the top of the Creator workspace. */
-export function ApprovalNotice({ submission: s, text, onGoToSignoff }) {
+export function ApprovalNotice({ submission: s, text, onGoToSignoff, allowResend = false }) {
   const { key, changed } = approvalState(s, text);
   let tone = "info";
   let Icon = Lock;
@@ -35,7 +38,14 @@ export function ApprovalNotice({ submission: s, text, onGoToSignoff }) {
       key === "pending_legal"
         ? `${s.approvals.manager?.name || "The manager"} approved ${timeAgo(s.approvals.manager?.at || s.updatedAt)} and forwarded it to legal.`
         : `Sent ${timeAgo(s.updatedAt)}. You will be notified here when it is approved or changes are requested.`;
-    if (changed) extra = <p className="mt-1.5 text-xs font-semibold text-amber-200">You edited the content after sending it. Re-send so the reviewers see the latest version.</p>;
+    if (changed)
+      extra = (
+        <p className="mt-1.5 text-xs font-semibold text-amber-200">
+          {allowResend
+            ? "You edited the content after sending it. Re-send so the reviewers see the latest version."
+            : "You edited the content after sending it. The reviewers are deciding on the version you sent; you can send the new version after their decision."}
+        </p>
+      );
   } else if (key === "rejected") {
     tone = "rose";
     Icon = CircleX;
@@ -104,15 +114,17 @@ export function ApprovalNotice({ submission: s, text, onGoToSignoff }) {
 }
 
 /** Publish (locked until approved) with "Send to Manager" directly below it. */
-export function ApprovalActions({ submission: s, text, canSend, onPublish, onSend }) {
+/** allowResend (demo): a new version may replace one that is still waiting for a decision. */
+export function ApprovalActions({ submission: s, text, canSend, onPublish, onSend, allowResend = false }) {
   const { key, changed } = approvalState(s, text);
   const unlocked = key === "approved" && !changed;
   let sendLabel = "Send to Manager";
   let sendDisabled = !canSend;
   if (key === "rejected") sendLabel = "Re-submit to Manager";
   else if (key === "pending_manager" || key === "pending_legal") {
-    sendLabel = changed ? "Re-send latest version" : "Sent - awaiting decision";
-    sendDisabled = !canSend || !changed;
+    sendLabel = allowResend && changed ? "Re-send latest version" : "Sent - awaiting decision";
+    // company mode: the server accepts a new version only after the reviewers decide
+    sendDisabled = !allowResend || !canSend || !changed;
   } else if (key === "approved") {
     sendLabel = changed ? "Re-submit changes" : "Approved";
     sendDisabled = !canSend || !changed;

@@ -18,22 +18,32 @@ import HumanVerification from "./components/HumanVerification.jsx";
 import AuditTrail from "./components/AuditTrail.jsx";
 import { Toasts } from "./components/ui.jsx";
 import VisualAudit from "./components/VisualAudit.jsx";
-import { ApprovalActions, ApprovalNotice, SendModal } from "./components/ApprovalFlow.jsx";
+import { ApprovalActions, ApprovalNotice, SendModal, sameText } from "./components/ApprovalFlow.jsx";
 import ReviewPanel from "./components/ReviewPanel.jsx";
 import { SignoffLog } from "./components/SignoffLog.jsx";
-import { loadName, markPublished, markSeen, markSignedOff, saveName, submitToManager, useWorkflow } from "./lib/workflow.js";
-import LoginScreen from "./components/LoginScreen.jsx";
+import { loadName, markPublished, markSeen, markSignedOff, saveName, setWorkflowMode, startWorkflowSync, submitToManager, useDemoWorkflow, useWorkflow } from "./lib/workflow.js";
+import Landing from "./components/Landing.jsx";
+import EnterScreen, { ENTER_MS } from "./components/EnterScreen.jsx";
+import MyContent from "./components/MyContent.jsx";
+import DemoLogin from "./components/DemoLogin.jsx";
+import CompanyPortal from "./components/CompanyPortal.jsx";
+import { fmtTime } from "./lib/videoAudit.js";
 import NetworkNotice from "./components/NetworkNotice.jsx";
-import { clearSession, lastCompany, loadSession, saveSession } from "./lib/session.js";
+import { clearSession, lastCompany, lastLogin, loadSession, saveSession } from "./lib/session.js";
 
 import { derivePolicy, groupFindings } from "./lib/insights.js";
-import { analyzeDocument, computeRisk, policyToText, tidy as tidySentence } from "./lib/policyEngine.js";
-import { api, API_BASE, toServerFinding, toUiFinding } from "./lib/api.js";
+import { analyzeDocument, policyToText, tidy as tidySentence } from "./lib/policyEngine.js";
+import { combineRisk, partScores } from "./lib/riskParts.js";
+import ThemeToggle from "./components/ThemeToggle.jsx";
+import { api, API_BASE, setAuthToken, setTenantTag, setUnauthorizedHandler, toServerFinding, toUiFinding } from "./lib/api.js";
 import { editorPlainText, locateInEditor, replaceInEditor } from "./lib/editorUtils.js";
 import { parseUpload } from "./lib/fileParser.js";
-import { buildPublicationPdf, domToBlocks, downloadBlob, slugify } from "./lib/pdfExport.js";
+import { buildPublicationPdf, domToBlocks, downloadBlob, pdfMedia, slugify } from "./lib/pdfExport.js";
 
 let uid = 0;
+/** A new id for one "Take a demo" session: its audits, publications and approvals are kept apart. */
+const newDemoId = () => `demo:${(globalThis.crypto?.randomUUID?.() || `${Date.now()}${Math.random()}`).replace(/[^a-z0-9]/gi, "").slice(0, 32)}`;
+const escapeHtml = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const POLICY_KEY = "publivra.policy.v1";
 function loadSavedPolicy() {
   try {
@@ -49,50 +59,116 @@ const nextId = (p) => `${p}-${Date.now().toString(36)}-${(uid++).toString(36)}`;
 export default function App() {
   // navigation
   const [drawerOpen, setDrawerOpen] = useState(false);
-  // Enterprise sign-in: parent company (tenant) -> child role. The role decides the panel.
-  const [session, setSession] = useState(loadSession);
-  const [loginPrefill, setLoginPrefill] = useState(() => lastCompany());
+  // Two channels (see components/Landing.jsx):
+  //   demo     "Take a demo" - any company, any role, no password; the workflow is kept in this browser.
+  //   company  "Start as company" - real logins checked by the backend; the company and role come from
+  //            the server and the workflow lives in the database.
+  const [session, setSession] = useState(() => {
+    let s = loadSession();
+    if (s?.mode === "demo" && !s.demoId) {
+      s = { ...s, demoId: newDemoId() }; // a demo session saved before session ids existed
+      saveSession(s);
+    }
+    setAuthToken(s?.mode === "company" ? s.token : null);
+    return s;
+  });
+  setWorkflowMode(session?.mode); // idempotent: picks the workflow store for this render
+  // Owner of audit history: the company comes from the token; a demo session sends its own id.
+  const tenantTag = session?.mode === "demo" ? session.demoId || "" : "";
+  setTenantTag(tenantTag);
+  const [entry, setEntry] = useState("landing"); // landing | demo | company (shown while signed out)
+  const [demoPrefill, setDemoPrefill] = useState(() => lastCompany());
+  const [companyNotice, setCompanyNotice] = useState("");
+  const [companySignIn, setCompanySignIn] = useState(false);
+  // short transition screen after every sign-in
+  const [entering, setEntering] = useState(null);
+  const enterTimer = useRef(null);
+  useEffect(() => () => clearTimeout(enterTimer.current), []);
   const role = session?.role || "creator";
   const [views, setViews] = useState({ creator: "workspace", manager: "approvals", legal: "legal" });
   const view = views[role];
   const setView = useCallback((v) => setViews((vs) => ({ ...vs, [role]: v })), [role]);
   const setCreatorView = useCallback((v) => setViews((vs) => ({ ...vs, creator: v })), []);
-  const onLogin = useCallback((s) => {
+  const onLogin = useCallback((signedIn) => {
+    let s = signedIn;
+    if (s.mode === "demo") {
+      // switching role inside a demo keeps its session; a new demo sign-in starts a fresh one
+      const keep = demoPrefill?.demoId && String(demoPrefill.company || "").trim().toLowerCase() === String(s.company || "").trim().toLowerCase();
+      s = { ...s, demoId: keep ? demoPrefill.demoId : newDemoId() };
+    }
     saveSession(s);
-    if (!loadName(s.role)) saveName(s.role, s.email);
+    setAuthToken(s.mode === "company" ? s.token : null);
+    if (s.mode === "company") saveName(s.role, s.name);
+    else if (!loadName(s.role)) saveName(s.role, s.email);
+    setCompanyNotice("");
+    setCompanySignIn(false);
+    setEntering({ role: s.role, company: s.company, name: s.mode === "company" ? s.name : "", demo: s.mode === "demo" });
+    clearTimeout(enterTimer.current);
+    enterTimer.current = setTimeout(() => setEntering(null), ENTER_MS);
     setSession(s);
     setDrawerOpen(false);
-  }, []);
+  }, [demoPrefill]);
+  const appMode = session?.mode; // demo | company
+  const logout = useCallback(
+    (notice = "") => {
+      clearSession();
+      setAuthToken(null);
+      setDemoPrefill(null);
+      setCompanyNotice(typeof notice === "string" ? notice : "");
+      setCompanySignIn(false);
+      setEntry(appMode === "company" ? "company" : "landing");
+      setSession(null);
+      setDrawerOpen(false);
+    },
+    [appMode],
+  );
+  // Demo: keep the company and pick another role - the creator's open document stays in place.
+  // Company: every role is its own login, so switching means signing in as someone else.
   const switchAccount = useCallback(() => {
-    // keep the company, pick another role - the creator's open document stays in place
-    setLoginPrefill({ company: session?.company, domain: session?.domain, role: session?.role });
     clearSession();
+    setAuthToken(null);
+    if (session?.mode === "company") {
+      setCompanyNotice("");
+      setCompanySignIn(true);
+      setEntry("company");
+    } else {
+      setDemoPrefill({ company: session?.company, domain: session?.domain, role: session?.role, demoId: session?.demoId });
+      setEntry("demo");
+    }
     setSession(null);
     setDrawerOpen(false);
   }, [session]);
-  const logout = useCallback(() => {
-    clearSession();
-    setLoginPrefill(null);
-    setSession(null);
-    setDrawerOpen(false);
-  }, []);
+  // the server ended the session (token expired, or the membership was removed)
+  useEffect(() => {
+    setUnauthorizedHandler((message) => logout(message));
+    return () => setUnauthorizedHandler(null);
+  }, [logout]);
+  // approvals live in the database: load this company's content and keep it fresh while signed in
+  useEffect(() => (session?.mode === "company" && session.token ? startWorkflowSync({ company: session.company }) : undefined), [session?.mode, session?.token, session?.company]);
   const allWorkflow = useWorkflow();
   // each company (tenant) only sees its own submissions
   const tenantOf = (c) => String(c || "").trim().toLowerCase();
   const workflow = useMemo(
-    () => ({ ...allWorkflow, submissions: allWorkflow.submissions.filter((s) => tenantOf(s.company) === tenantOf(session?.company)) }),
-    [allWorkflow, session?.company],
+    () => ({
+      ...allWorkflow,
+      // demo: only this demo session; company mode: the server already sends only this company's items
+      submissions: allWorkflow.submissions.filter((s) => (session?.mode === "demo" ? s.demoId === session.demoId : tenantOf(s.company) === tenantOf(session?.company))),
+    }),
+    [allWorkflow, session?.mode, session?.demoId, session?.company],
   );
+  // Demo sign-in: items waiting for each role of a company (shown on the role cards).
+  const demoWorkflow = useDemoWorkflow();
   const pendingFor = useCallback(
     (c) => {
-      const subs = allWorkflow.submissions.filter((s) => tenantOf(s.company) === tenantOf(c));
+      // only the demo session being continued (role switch); a new demo session starts empty
+      const subs = demoWorkflow.submissions.filter((s) => demoPrefill?.demoId && s.demoId === demoPrefill.demoId && tenantOf(s.company) === tenantOf(c));
       return {
         manager: subs.filter((s) => s.status === "pending_manager").length,
         legal: subs.filter((s) => s.status === "pending_legal").length,
         creator: subs.filter((s) => !s.seenByCreator).length,
       };
     },
-    [allWorkflow],
+    [demoWorkflow, demoPrefill],
   );
   const [currentSubId, setCurrentSubId] = useState(null);
   const currentSub = workflow.submissions.find((s) => s.id === currentSubId) || null;
@@ -241,11 +317,13 @@ export default function App() {
     return { ...analysis, findings: [...ruleFindings, ...aiOnly] };
   }, [analysis, ai, text]);
 
-  const visualFindings = useMemo(
-    () => [...visualImages.flatMap((i) => [...i.findings, ...(i.adFindings || [])]), ...videos.flatMap((v) => v.findings)],
-    [visualImages, videos],
+  const imageFindings = useMemo(() => visualImages.flatMap((i) => [...i.findings, ...(i.adFindings || [])]), [visualImages]);
+  const visualFindings = useMemo(() => [...imageFindings, ...videos.flatMap((v) => v.findings)], [imageFindings, videos]);
+  // Three scores - text (incl. tone), logo & graphics, video - and their average (see lib/riskParts.js).
+  const risk = useMemo(
+    () => (merged ? combineRisk({ textFindings: merged.findings, tone: merged.tone, imageFindings, hasImages: visualImages.length > 0, videos, dismissed }) : null),
+    [merged, imageFindings, visualImages.length, videos, dismissed],
   );
-  const risk = useMemo(() => (merged ? computeRisk([...merged.findings, ...visualFindings], merged.tone, dismissed) : null), [merged, visualFindings, dismissed]);
 
   const issueGroups = useMemo(() => (merged ? groupFindings(merged.findings, dismissed) : []), [merged, dismissed]);
 
@@ -264,7 +342,7 @@ export default function App() {
         tone_profile: policy.tone || "Professional",
         // the dashboard's own rule checks, so the charts count PII / banned terms too
         rule_findings: [...(analysis?.findings ?? []), ...visualFindings].filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
-        company: company.trim(),
+        company: tenantTag,
       });
       setAi({ status: "done", result, error: null, textAtRun: snapshot, ranAt: Date.now() });
       if (engine.status !== "online") setEngine((e) => ({ ...e, status: "online" }));
@@ -279,7 +357,7 @@ export default function App() {
       log(`AI audit failed: ${e.message}`, "AI");
       toast(`AI audit failed: ${e.message}`, "danger");
     }
-  }, [text, title, source, policy, policyDoc, engine.status, log, toast, analysis, dismissed, company, visualFindings]);
+  }, [text, title, source, policy, policyDoc, engine.status, log, toast, analysis, dismissed, tenantTag, visualFindings]);
 
   // Improvement 1: ad / body text read from an image goes through the rule checks + AI deep audit.
   const runAdTextAudit = useCallback(
@@ -294,7 +372,7 @@ export default function App() {
           policy_document: policyDoc ? { name: policyDoc.name, text: policyDoc.text } : null,
           tone_profile: policy.tone || "Professional",
           rule_findings: [...imageFindings, ...local].filter((f) => f.verdict !== "VERIFIED").map(toServerFinding),
-          company: company.trim(),
+          company: tenantTag,
         });
         const aiFindings = result.findings.map((f) => ({ ...toUiFinding(f), image: imageName }));
         const overlap = (r) => aiFindings.some((x) => (x.match || "").toLowerCase().includes((r.match || "").toLowerCase()) && r.match);
@@ -305,7 +383,7 @@ export default function App() {
         return { findings: local, note: `AI deep audit unavailable (${e.message}). Showing the instant rule checks only.` };
       }
     },
-    [policy, policyDoc, company, log],
+    [policy, policyDoc, tenantTag, log],
   );
 
   const lastLevel = useRef(null);
@@ -391,6 +469,33 @@ export default function App() {
     setDrawerOpen(false);
   };
 
+  // Another company, login or demo session must never see the previous user's open document.
+  // Switching role inside one demo session keeps it, as before.
+  const workspaceKey = session ? (session.mode === "company" ? `company|${session.userId}` : `demo|${session.demoId}`) : null;
+  const lastWorkspace = useRef(workspaceKey);
+  useEffect(() => {
+    if (workspaceKey && lastWorkspace.current !== workspaceKey) {
+      if (lastWorkspace.current !== null) {
+        newAudit();
+        setPublications([]);
+        setActivity([]);
+      }
+      lastWorkspace.current = workspaceKey;
+    }
+  });
+
+  // Creator: reopen saved content (a draft, returned or approved item) in the editor to revise or publish it.
+  const openSubmission = (sub) => {
+    const html = sub.text
+      .split(/\n+/)
+      .filter((line) => line.trim())
+      .map((line) => `<p>${escapeHtml(line)}</p>`)
+      .join("");
+    openDocument(html, { type: "saved", name: sub.title });
+    setCurrentSubId(sub.id);
+    log(`Opened "${sub.title}" from the approval log`);
+  };
+
   // -------------------------------------------------------- suggestions
   const onLocate = (f) => {
     setView("workspace");
@@ -459,7 +564,7 @@ export default function App() {
   // ------------------------------------------------------------ publish
   // Ready to send = content is checked. Publishing additionally needs manager + legal approval of THIS version.
   const canSend = !!(mode && analysis && !scanning && text.trim().length > 0);
-  const approved = !!(currentSub && currentSub.status === "approved" && currentSub.text === text);
+  const approved = !!(currentSub && currentSub.status === "approved" && sameText(currentSub.text, text));
   const canPublish = canSend && approved;
   const onPublish = () => {
     if (!canPublish) {
@@ -488,15 +593,16 @@ export default function App() {
       }
     : null;
 
-  const sendToManager = ({ name, note }) => {
+  const sendToManager = async ({ name, note }) => {
     saveName("creator", name);
     const open = (merged?.findings ?? []).filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]);
     const allFindings = [...(merged?.findings ?? []), ...visualFindings];
     const payload = {
       title,
       company: company.trim(),
+      ...(session?.mode === "demo" ? { demoId: session.demoId } : {}),
       text,
-      risk: { level: risk.level, score: risk.score, counts: risk.counts, reasons: risk.reasons },
+      risk: { level: risk.level, score: risk.score, counts: risk.counts, reasons: risk.reasons, parts: partScores(risk) },
       tone: merged?.tone ? { score: merged.tone.score, profile: merged.tone.profile } : null,
       ai: ai.result
         ? { model: ai.result.model, auditId: ai.result.audit_id ?? null, counts: ai.result.counts, stale: text !== ai.textAtRun, ranAt: ai.ranAt || Date.now() }
@@ -518,22 +624,52 @@ export default function App() {
               name: v.name,
               duration: v.duration,
               poster: v.poster,
-              findings: v.findings.filter((f) => !dismissed[f.id]).map(({ id, time, verdict, severity, category, match, explanation, recommendation }) => ({ id, time, verdict, severity, category, match, explanation, recommendation })),
+              score: v.score,
+              level: v.level,
+              model: v.model,
+              summary: String(v.summary || "").slice(0, 600),
+              findings: v.findings
+                .filter((f) => !dismissed[f.id])
+                .map(({ id, time, end, aspect, policyQuote, verdict, severity, category, match, explanation, recommendation, source }) => ({
+                  id,
+                  time,
+                  end,
+                  aspect,
+                  policyQuote: String(policyQuote || "").slice(0, 300),
+                  verdict,
+                  severity,
+                  category,
+                  match: `[${fmtTime(time)}] ${String(match || "").slice(0, 200)}`,
+                  explanation: String(explanation || "").slice(0, 400),
+                  recommendation,
+                  source,
+                })),
             })),
             images: visualImages.map((i) => ({
               name: i.name,
               thumb: i.thumb,
-              findings: i.findings.filter((f) => !dismissed[f.id]).map(({ id, verdict, severity, category, match, explanation, recommendation }) => ({ id, verdict, severity, category, match, explanation, recommendation })),
-              adFindings: (i.adFindings || []).filter((f) => !dismissed[f.id]).map(({ id, verdict, severity, category, match, explanation }) => ({ id, verdict, severity, category, match, explanation })),
+              logoMatch: i.compare?.score ?? null,
+              findings: i.findings
+                .filter((f) => !dismissed[f.id])
+                .map(({ id, verdict, severity, category, match, explanation, recommendation, clause, policyQuote }) => ({ id, verdict, severity, category, match, explanation, recommendation, clause, policyQuote })),
+              adFindings: (i.adFindings || [])
+                .filter((f) => !dismissed[f.id])
+                .map(({ id, verdict, severity, category, match, explanation, recommendation, policyQuote }) => ({ id, verdict, severity, category, match, explanation, recommendation, policyQuote })),
             })),
           }
         : null,
       policyName: policyDoc ? `${policyDoc.name} + PUBLIVRA built-in rules` : policy.name,
     };
-    const resubmit = !!currentSub;
-    const id = submitToManager({ id: currentSub?.id, creatorName: name, note, payload });
-    setCurrentSubId(id);
+    const resubmit = !!currentSub && (currentSub.submits ? currentSub.submits.length > 0 : true);
     setSendOpen(false);
+    try {
+      setCurrentSubId(await submitToManager({ id: currentSub?.id, creatorName: name, note, payload }));
+    } catch (e) {
+      if (e.contentId) setCurrentSubId(e.contentId); // saved as a draft, but not submitted
+      log(`Sending "${title}" to the manager failed: ${e.message}`);
+      toast(`Could not send to the manager: ${e.message}`, "danger");
+      return;
+    }
     log(`${resubmit ? "Re-submitted" : "Sent"} "${title}" to the manager for approval${note ? ` - note: ${note}` : ""}`);
     api.logEvent({ actor: name, action: resubmit ? "resubmit_to_manager" : "send_to_manager", detail: `${title} (risk ${risk.level} ${risk.score}/100)`, audit_id: ai.result?.audit_id ?? null });
     toast(`${resubmit ? "Re-submitted" : "Sent"} to the manager. Publishing unlocks once it is approved.`, "success");
@@ -555,12 +691,38 @@ export default function App() {
     if (role === "creator" && view === "workspace" && currentSub && !currentSub.seenByCreator) markSeen(currentSub.id);
   }, [role, view, currentSub]);
 
-  const doPublish = (fileName, overridden) => {
+  const doPublish = async (fileName, overridden) => {
     const at = Date.now();
+    const name = `${slugify(fileName)}.pdf`;
+    // The server decides: it only publishes content that is approved, owned by this creator and in this company.
+    if (currentSub) {
+      try {
+        await markPublished(currentSub.id, { fileName: name, creatorName: currentSub.creatorName });
+      } catch (e) {
+        setModal(null);
+        log(`Publishing was refused by the server: ${e.message}`);
+        toast(`Publishing was refused: ${e.message}`, "danger");
+        return;
+      }
+    }
+    // Video and logo results: what is on screen, or (after signing in again) the approved submission's copy.
+    const media = pdfMedia({ videos, images: visualImages, saved: currentSub?.visual, dismissed });
+    const liveParts = partScores(risk);
+    const savedParts = currentSub?.risk?.parts || {};
+    const parts = {
+      text: liveParts.text,
+      graphics: liveParts.graphics || (media.fromSaved ? savedParts.graphics : null) || null,
+      video: liveParts.video || (media.fromSaved ? savedParts.video : null) || null,
+    };
+    // the approved submission's average already includes its video and logo scores
+    const pdfRisk = media.fromSaved && currentSub?.risk?.counts ? { ...risk, level: currentSub.risk.level, score: currentSub.risk.score, counts: currentSub.risk.counts } : risk;
     const blob = buildPublicationPdf({
       title,
       blocks: domToBlocks(editorRef.current),
-      risk,
+      risk: pdfRisk,
+      parts,
+      media,
+      improvements: improvements.length ? improvements : currentSub?.improvements || [],
       tone: merged.tone,
       findings: merged.findings,
       aiInfo: ai.result ? { model: ai.result.model, auditId: ai.result.audit_id, retrieval: ai.result.retrieval.mode, stale: text !== ai.textAtRun } : null,
@@ -575,10 +737,8 @@ export default function App() {
           : `Approved by manager ${currentSub.approvals.manager?.name} and legal approver ${currentSub.approvals.legal?.name} (version ${currentSub.version}).`
         : null,
     });
-    const name = `${slugify(fileName)}.pdf`;
     downloadBlob(blob, name);
     const pub = { id: nextId("pub"), title, fileName: name, at, risk, overridden, status: "pending", serverId: null, subId: currentSub?.id ?? null };
-    if (currentSub) markPublished(currentSub.id, { fileName: name, creatorName: currentSub.creatorName });
     pdfStore.current[pub.id] = blob;
     setPublications((p) => [pub, ...p]);
     setActivePubId(pub.id);
@@ -595,7 +755,7 @@ export default function App() {
         // final state after the creator's fixes -> the "after publication" chart
         findings: [...merged.findings, ...visualFindings].filter((f) => f.verdict !== "VERIFIED" && !dismissed[f.id]).map(toServerFinding),
         tone_score: merged.tone?.score != null ? Math.round(merged.tone.score) : null,
-        company: company.trim(),
+        company: tenantTag,
       })
       .then((r) => {
         if (r?.id) {
@@ -651,7 +811,23 @@ export default function App() {
   return (
     <>
     <NetworkNotice />
-    {!session && <LoginScreen key={loginPrefill?.company || "new"} initial={loginPrefill} onLogin={onLogin} pendingFor={pendingFor} />}
+    {entering && <EnterScreen {...entering} />}
+    {!session && <ThemeToggle floating />}
+    {!session && entry === "landing" && <Landing onDemo={() => setEntry("demo")} onCompany={() => setEntry("company")} />}
+    {!session && entry === "demo" && <DemoLogin key={demoPrefill?.company || "new"} initial={demoPrefill} onLogin={onLogin} pendingFor={pendingFor} onBack={() => setEntry("landing")} />}
+    {!session && entry === "company" && (
+      <CompanyPortal
+        key={`${companyNotice}|${companySignIn}`}
+        initial={(() => {
+          const l = lastLogin();
+          return l ? { ids: { [l.role]: l.email } } : null;
+        })()}
+        notice={companyNotice}
+        openSignIn={companySignIn}
+        onLogin={onLogin}
+        onBack={() => setEntry("landing")}
+      />
+    )}
     <div className={session ? "min-h-full" : "hidden"} aria-hidden={!session}>
       <TopBar
         onToggleDrawer={() => setDrawerOpen((o) => !o)}
@@ -690,7 +866,11 @@ export default function App() {
         {/* Workspace stays mounted so the document survives navigation. */}
         <div className={role === "creator" && view === "workspace" ? "" : "hidden"}>
           {!mode ? (
-            <StartScreen onStart={onStart} toast={toast} currentPolicy={policyDoc} />
+            <div className="space-y-4">
+              {/* content already sent for approval stays reachable after signing out and back in */}
+              <MyContent submissions={workflow.submissions} onOpen={openSubmission} />
+              <StartScreen onStart={onStart} toast={toast} currentPolicy={policyDoc} />
+            </div>
           ) : (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -700,7 +880,7 @@ export default function App() {
                 <Stepper current={step} />
               </div>
 
-              <ApprovalNotice submission={currentSub} text={text} onGoToSignoff={() => setCreatorView("verification")} />
+              <ApprovalNotice submission={currentSub} text={text} onGoToSignoff={() => setCreatorView("verification")} allowResend={appMode === "demo"} />
               {risk ? (
                 <RiskBanner
                   risk={risk}
@@ -712,7 +892,8 @@ export default function App() {
                           .join(" and ")
                       : null
                   }
-                  actions={<ApprovalActions submission={currentSub} text={text} canSend={canSend} onPublish={onPublish} onSend={() => setSendOpen(true)} />}
+                  parts={risk.parts}
+                  actions={<ApprovalActions submission={currentSub} text={text} canSend={canSend} onPublish={onPublish} onSend={() => setSendOpen(true)} allowResend={appMode === "demo"} />}
                 />
               ) : (
                 <div className="h-[104px] animate-pulse rounded-2xl border border-slate-800 bg-slate-900/60" />
@@ -739,6 +920,12 @@ export default function App() {
 
               <VisualAudit
                 policyText={policyDoc?.text || ""}
+                policyDoc={policyDoc}
+                toneProfile={policy.tone || "Professional"}
+                company={tenantTag}
+                onOpenRef={openPolicyRef}
+                onEngineOnline={() => setEngine((e) => (e.status === "online" ? e : { ...e, status: "online" }))}
+                graphicsRisk={risk?.parts?.graphics || null}
                 images={visualImages}
                 videos={videos}
                 onVideosChange={setVideos}
@@ -807,10 +994,10 @@ export default function App() {
           />
         )}
         {(role === "manager" || role === "legal") && (view === "approvals" || view === "legal") && <ReviewPanel role={role} workflow={workflow} toast={toast} />}
-        {view === "insights" && <Insights company={company} />}
+        {view === "insights" && <Insights company={company} scope={tenantTag} demo={session?.mode === "demo"} />}
         {view === "history" && (
           <div className="mx-auto max-w-6xl space-y-6">
-            <SignoffLog workflow={workflow} />
+            <SignoffLog workflow={workflow} onOpen={role === "creator" ? openSubmission : null} currentId={currentSubId} />
             {role !== "legal" && (
           <AuditTrail
             publications={publications}
@@ -840,7 +1027,7 @@ export default function App() {
         onClose={() => setSendOpen(false)}
         onConfirm={sendToManager}
         summary={sendSummary}
-        defaultName={currentSub?.creatorName || loadName("creator") || session?.email || ""}
+        defaultName={session?.name || currentSub?.creatorName || loadName("creator") || ""}
         resubmit={!!currentSub}
       />
       <PolicyViewer open={!!viewer} onClose={() => setViewer(null)} doc={viewer?.doc} target={viewer?.target} />

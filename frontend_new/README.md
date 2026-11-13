@@ -159,11 +159,21 @@ Use `frontend` as the root directory. Vite is detected automatically (`vercel.js
 
 ## Round 3
 
-**Enterprise sign-in.** Step 1: parent company (e.g. *Publivra Corp* → `@publivra.com`). Step 2: pick a role
-(Creator, Manager or Legal Approver) and sign in with a company ID ending in that domain - or use **Autofill demo ID**.
-The top bar shows the company, ID and role badge; **Switch account** / **Logout** are in the account menu.
-Each company only sees its own submissions. The creator's open document stays in place while you switch roles.
-(Demo sign-in: no password; data is kept in the browser.)
+**Two channels.** The first screen offers:
+- **Take a demo** - the original demo: type any company name, pick any role (no password) and switch roles freely
+  with "Switch account". Every feature works; the approval workflow is kept in this browser (`src/lib/workflowDemo.js`).
+- **Start as company** - real accounts (`src/components/CompanyPortal.jsx`):
+  - **Register your Company**: company name, domain (suggested as `@companyname.com`), optional company e-mail, then a
+    login ID (suggested as `creator@`, `manager@`, `legal@` + domain) and a password for each of the three roles.
+    **Done & create** issues the three logins and shows them once with copy buttons.
+  - **Sign in** (just below): a popup to choose Creator, Manager or Legal Approver, then login ID + password.
+  - The backend checks the password and returns a signed token; company and role come from the server, and each
+    company only ever sees its own content and approvals.
+`src/lib/workflow.js` picks the demo or the database workflow for the signed-in mode, so the panels are the same in both.
+
+**In company mode, approvals are stored in the database** (`/api/workflow`), so reviewers on other devices see the same submissions. The
+server enforces every rule; the buttons only reflect it. The panels refresh every 12 seconds and when the tab regains focus.
+In **History & sign-off**, the creator can reopen a draft, a returned item or an approved item in the editor.
 
 - **Creator panel** - check text, PDFs and images. Publishing stays **locked** until the content is approved.
   "Send to Manager" sends the content, the fixes applied, the visual audit and the AI score.
@@ -182,13 +192,41 @@ Each company only sees its own submissions. The creator's open document stays in
   goes through the rule checks and the AI deep audit (Contradicted / Unverified / Verified).
 Image findings count towards the risk score, go to the manager, and feed the **Logo** bars in Insights.
 
-**Upload Video (Creator panel).** Upload an MP4 / MOV / WEBM or click **Load Sample Ad Video**. Frames are sampled
-across the whole video and each is checked for the brand watermark (logo), brand colours and on-screen captions
-(brand name & motto must be identical; other captions go to the AI deep audit). Every finding has a timestamp -
-click it to jump the player there. Spoken voiceover is not transcribed yet, so it is flagged for a reviewer.
-Video findings count towards the risk score and are sent to the Manager / Legal approver.
+**Logo check.** At the top of *Logo, images & graphics audit* are two slots side by side:
+- **Reference logo (correct)** - the approved logo file. It is kept in the browser with the rest of the brand kit.
+- **Logo used in your content (to test)** - the logo file you put in the ad, post or video.
+The content logo is compared directly with the reference (`auditContentLogo` in `src/lib/visualAudit.js`): both are trimmed
+to their visible area, then checked for shape (match %), proportions (stretched / squashed beyond 8%) and colour (ΔE > 18).
+The result (Verified / Contradicted / Unverified with the match %) counts in the logo & graphics score and goes to the manager.
+Ads and posters added below are also searched for the reference logo, and videos are compared with it by the AI.
+
+**Upload Video (Creator panel).** Upload an MP4 / MOV / WEBM clip of **up to 20 seconds** (40 MB), or click **Load Sample Ad Video**.
+The clip is analysed by the backend's video audit (`POST /api/video-audit`: Gemini video + audio understanding, with a Groq
+backup engine when Gemini is busy) against your policy and brand kit:
+- on-screen text, spoken words, audio / music, colour theme, logo (vs the reference logo), visuals, tone, personal data and claims;
+- every finding has a **timestamp** and a tag: **Verified** (green), **Unverified** (yellow) or **Contradicted** (red);
+- contradicted findings show the policy line they break (the link opens the policy viewer on that line) or the brand-kit value;
+- a **timeline** under the player has one lane per aspect; click a block or a timestamp to play that moment.
+Before uploading, the browser grabs 12 still frames for the backup engine. An amber note says when the backup was used and what
+it could not check (music and sound effects). Video findings count towards the risk score and are sent to the Manager / Legal approver.
+Files: `src/components/VideoAudit.jsx`, `src/lib/videoAudit.js`.
+
+**Three scores and their average.** Risk is scored in three parts (`src/lib/riskParts.js`):
+- **Text & tone** - live rules + AI audit of the document, plus the tone score;
+- **Logo & graphics** - the image audit (logo vs the reference logo, brand colours, text inside images);
+- **Video** - the video audit.
+The **risk score is the average of the parts that were checked**; a part that was not checked is left out and shown as "not checked".
+The **risk level** (LOW / MEDIUM / HIGH) is the highest level of any part, so one serious breach is never averaged away.
+Hover (or focus) the **risk pill in the top bar** to see the three scores; the risk banner, the video card and the
+logo & graphics header show them too, and they are sent to the manager with the submission.
 
 **Insights** - the same dashboard (Common graph + Company graph, repeated-issues popups) in all three panels.
 
-> Note: approvals are stored in the browser for this demo, so all roles must use the same browser.
-> A shared database table and logins are needed for reviewers on different devices.
+> Note: the human sign-off checklist and the "seen" markers are still kept per browser. Files: `src/components/LoginScreen.jsx`,
+> `src/lib/session.js`, `src/lib/workflow.js`, `src/lib/api.js`.
+
+**Who sees what.** History (AI audits, publications, sign-offs), session activity and the company graph in Insights show only
+the signed-in company's data, or in a demo only that demo session's data (`demoId`, created at each demo sign-in and kept when
+switching role). The common graph shows every check to everyone. **Your content** on the creator's start screen lists what was
+sent for approval, with its status and the reviewers' comments, so it is always reachable after signing out and back in.
+After each sign-in a 1.5-second transition screen (`src/components/EnterScreen.jsx`) shows the role and company.

@@ -8,7 +8,8 @@ const ENGINE = {
   degraded: { label: "AI key missing", dot: "bg-amber-400" },
   offline: { label: "AI engine offline", dot: "bg-rose-500" },
 };
-import { RISK_STYLE } from "./ui.jsx";
+import { RiskPill } from "./RiskBreakdown.jsx";
+import ThemeToggle from "./ThemeToggle.jsx";
 
 export const ROLE_TABS = [
   { id: "creator", label: "Creator", icon: PenLine },
@@ -88,7 +89,8 @@ export function AccountMenu({ session, onSwitch, onLogout, badges = {} }) {
       {open && (
         <div className="fade-in absolute left-0 top-full z-50 mt-1.5 w-72 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl sm:left-auto sm:right-0">
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <Building2 className="h-3.5 w-3.5" /> Parent company
+            <Building2 className="h-3.5 w-3.5" /> {session.mode === "company" ? "Company" : "Parent company"}
+            {session.mode === "demo" && <span className="ml-auto rounded-full border border-amber-500/50 bg-amber-500/10 px-1.5 text-[10px] font-semibold text-amber-200">Demo</span>}
           </div>
           <div className="mt-0.5 truncate text-sm font-bold text-white">{session.company}</div>
           <div className="mt-2 truncate text-xs text-slate-300">{session.email}</div>
@@ -149,6 +151,7 @@ export default function TopBar({ onToggleDrawer, drawerOpen, title, risk, scanni
         </div>
       )}
       <div className="ml-auto flex items-center gap-2">
+        <ThemeToggle />
         <button
           onClick={onRetryEngine}
           title={engine?.info ? `${engine.info.ai.model} · DB ${engine.info.database.state}` : engine?.error || "Click to re-check"}
@@ -157,15 +160,8 @@ export default function TopBar({ onToggleDrawer, drawerOpen, title, risk, scanni
           <span className={`h-2 w-2 rounded-full ${eng.dot}`} />
           {eng.label}
         </button>
-        {risk && role === "creator" && (
-          <span
-            className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold tracking-wide sm:inline-flex ${RISK_STYLE[risk.level].pill}`}
-            aria-live="polite"
-          >
-            {scanning && <span className="h-1.5 w-1.5 animate-ping rounded-full bg-current" />}
-            {RISK_STYLE[risk.level].label}
-          </span>
-        )}
+        {/* hover / focus: text, logo & graphics and video scores, and their average */}
+        {risk && role === "creator" && <RiskPill risk={risk} scanning={scanning} />}
         {role === "creator" && (
         <button
           onClick={onPublish}
